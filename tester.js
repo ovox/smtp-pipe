@@ -6,7 +6,9 @@ program
   .option("-h, --host <host>", "SMTP host")
   .option("-p, --port <port>", "SMTP port", parseInt)
   .option("-u, --user <user>", "SMTP user (optional)")
-  .option("-P, --password <password>", "SMTP password (optional)");
+  .option("-P, --password <password>", "SMTP password (optional)")
+  .option("-t --to <to>", "Email recipient (optional)")
+  .option("-f --from <from>", "Email sender (optional)");
 
 program.parse(process.argv);
 const options = program.opts();
@@ -26,18 +28,36 @@ const transporter = nodemailer.createTransport({
 });
 
 function getRandomEmailOptions() {
-  const sendText = Math.random() > 0.5;
-  const sendHtml = Math.random() > 0.5;
+  let sendText = Math.random() > 0.5;
+  let sendHtml = Math.random() > 0.5;
   const addAttachment = Math.random() > 0.5;
 
+  if (!sendText && !sendHtml) {
+    sendHtml = true;
+  }
+
+  if (sendText && sendHtml) {
+    sendHtml = false;
+  }
+
   const emailOptions = {
-    from: `"${faker.person.fullName()}" <${faker.internet.email()}>`,
-    to: `${faker.internet.email()}`,
+    from: `"${faker.person.fullName()}" <${
+      options.from ?? faker.internet.email()
+    }>`,
+    to: `${options.to ?? faker.internet.email()}`,
     subject: faker.lorem.sentence(),
     text: sendText ? faker.lorem.paragraph() : undefined,
     html: sendHtml ? `<p>${faker.lorem.paragraphs()}</p>` : undefined,
     attachments: [],
   };
+
+  if (!sendText) {
+    delete emailOptions.text;
+  }
+
+  if (!sendHtml) {
+    delete emailOptions.html;
+  }
 
   if (addAttachment) {
     for (let i = 0; i < Math.floor(Math.random() * 3) + 1; i++) {

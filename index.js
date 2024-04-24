@@ -52,6 +52,12 @@ const server = new SMTPServer({
         })),
       };
 
+      if (parsed.text && parsed.html) {
+        delete emailData.text;
+      } else if (parsed.text) {
+        delete emailData.html;
+      }
+
       const fullObj = { user: session.user, email: emailData };
 
       if (pipeProgram) {
