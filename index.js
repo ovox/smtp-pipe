@@ -4,10 +4,13 @@ const fs = require("fs");
 const path = require("path");
 const { program } = require("commander");
 
-program.option(
-  "-p, --pipe <program>",
-  "Save the result in a random file and pass the filename to the shell program (optional)"
-);
+program
+  .option(
+    "-p, --pipe <program>",
+    "Save the result in a random file and pass the filename to the shell program (optional)"
+  )
+  .option("-h, --host <host>", "SMTP host")
+  .option("-P, --port <port>", "SMTP port", parseInt);
 
 program.parse(process.argv);
 const options = program.opts();
@@ -88,6 +91,9 @@ const server = new SMTPServer({
   },
 });
 
-server.listen(25, () => {
-  console.log("SMTP server listening on port 25");
+const port = options.port || 25;
+// const host = options.host || "127.0.0.1";
+
+server.listen(port, () => {
+  console.log(`SMTP server listening on ${port}`);
 });
