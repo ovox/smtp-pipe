@@ -1,0 +1,18 @@
+.vercel
+
+.env*
+!.env.example
+rm
+
+.turbo
+node_modules
+dist
+.next
+
+.tinyb
+.tinyb
+
+# contentlayer
+.contentlayer
+
+.DS_Store
