@@ -40,12 +40,14 @@ function getRandomEmailOptions() {
   };
 
   if (addAttachment) {
-    emailOptions.attachments.push({
-      filename: "sample.txt",
-      content:
-        "This is a sample attachment with random text: " +
-        faker.lorem.sentence(),
-    });
+    for (let i = 0; i < Math.floor(Math.random() * 3) + 1; i++) {
+      emailOptions.attachments.push({
+        filename: `${Math.random().toString(36).substring(10)}.txt`,
+        content:
+          "This is a sample attachment with random text: " +
+          faker.lorem.sentence(),
+      });
+    }
   }
 
   return emailOptions;
