@@ -13,7 +13,7 @@ const server = new SMTPServer({
         return;
       }
 
-      console.log("parsed", parsed);
+      //   console.log("parsed", parsed, session);
 
       if (parsed.attachments.length > 0) {
         // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
@@ -41,7 +41,9 @@ const server = new SMTPServer({
         })),
       };
 
-      console.log(JSON.stringify(emailData, null, 2));
+      console.log(
+        JSON.stringify({ user: session.user, email: emailData }, null, 2)
+      );
       callback();
     });
   },
