@@ -2,6 +2,17 @@ const { SMTPServer } = require("smtp-server");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
+const { program } = require("commander");
+
+program.option(
+  "-p, --pipe <program>",
+  "Save the result in a random file and pass the filename to the shell program (optional)"
+);
+
+program.parse(process.argv);
+const options = program.opts();
+
+const pipeProgram = options.pipe;
 
 const server = new SMTPServer({
   secure: false,
@@ -20,7 +31,7 @@ const server = new SMTPServer({
         parsed.attachments.forEach((attachment) => {
           const filepath = path.join(
             "/tmp",
-            Math.random().toString(36).substring(7)
+            Math.random().toString(36).substring(2)
           );
           fs.writeFileSync(filepath, attachment.content);
           attachment.filepath = filepath;
@@ -41,9 +52,25 @@ const server = new SMTPServer({
         })),
       };
 
-      console.log(
-        JSON.stringify({ user: session.user, email: emailData }, null, 2)
-      );
+      const fullObj = { user: session.user, email: emailData };
+
+      if (pipeProgram) {
+        // write the fullObj to a random file in /tmp and pass the filename to the shell program
+        const rf = `/tmp/${Math.random().toString(36).substring(2)}.json`;
+        fs.writeFileSync(rf, JSON.stringify(fullObj, null, 2));
+        const childProcess = require("child_process");
+        // console.log("Executing the program", pipeProgram, rf);
+        const child = childProcess.spawn(pipeProgram, [rf]);
+        child.on("error", (err) => {
+          console.error("Error executing the program", err);
+        });
+        child.stdout.on("data", (data) => {
+          console.log(`${data}`);
+        });
+      } else {
+        console.log(JSON.stringify(fullObj, null, 2));
+      }
+
       callback();
     });
   },

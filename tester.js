@@ -42,7 +42,7 @@ function getRandomEmailOptions() {
   if (addAttachment) {
     for (let i = 0; i < Math.floor(Math.random() * 3) + 1; i++) {
       emailOptions.attachments.push({
-        filename: `${Math.random().toString(36).substring(10)}.txt`,
+        filename: `${Math.random().toString(36).substring(2)}.txt`,
         content:
           "This is a sample attachment with random text: " +
           faker.lorem.sentence(),
