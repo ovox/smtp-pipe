@@ -3,6 +3,7 @@ const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
 const { program } = require("commander");
+const os = require("os");
 
 program
   .option(
@@ -13,6 +14,8 @@ program
   .option("-P, --port <port>", "SMTP port", parseInt)
   .option("-c, --cer <cer>", "Path to certificate (optional)")
   .option("-k, --key <key>", "Path to key (optional)")
+  .option("-ca, --ca <cer>", "Path to ca certificates (optional)")
+  .option("-s, --server <server>", "SMTP server name (optional)")
   .option(
     "-a, --cca <cca>",
     "Request client certificate true/false (optional)"
@@ -24,7 +27,9 @@ const options = program.opts();
 const pipeProgram = options.pipe;
 const cer = options.cer;
 const key = options.key;
+const ca = options.ca;
 const cca = options.cca === "true";
+const name = options.server ?? os.hostname;
 
 console.log(
   `Running a ${cer && key ? "secure" : "insecure"} SMTP server on port ${
@@ -36,6 +41,8 @@ const server = new SMTPServer({
   requestCert: cer && key && cca ? true : false,
   key: key ? fs.readFileSync(key) : undefined,
   cert: cer ? fs.readFileSync(cer) : undefined,
+  ca: ca ? fs.readFileSync(ca) : undefined,
+  name: name,
   onData(stream, session, callback) {
     simpleParser(stream, async (err, parsed) => {
       try {
