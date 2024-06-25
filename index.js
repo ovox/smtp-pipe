@@ -37,9 +37,9 @@ const name = options.server ?? os.hostname;
 const insecure = options.insecure === "true";
 
 console.log(
-  `Running a ${cer && key ? "secure" : "insecure"} SMTP server on port ${
-    options.port
-  }`
+  `Running a ${
+    cer && key && !insecure ? "secure" : "insecure"
+  } SMTP server on port ${options.port}`
 );
 const server = new SMTPServer({
   secure: cer && key && !insecure ? true : false,
