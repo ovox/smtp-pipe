@@ -12,7 +12,11 @@ program
   .option("-h, --host <host>", "SMTP host")
   .option("-P, --port <port>", "SMTP port", parseInt)
   .option("-c, --cer <cer>", "Path to certificate (optional)")
-  .option("-k, --key <key>", "Path to key (optional)");
+  .option("-k, --key <key>", "Path to key (optional)")
+  .option(
+    "-a, --cca <cca>",
+    "Request client certificate true/false (optional)"
+  );
 
 program.parse(process.argv);
 const options = program.opts();
@@ -20,6 +24,7 @@ const options = program.opts();
 const pipeProgram = options.pipe;
 const cer = options.cer;
 const key = options.key;
+const cca = options.cca === "true";
 
 console.log(
   `Running a ${cer && key ? "secure" : "insecure"} SMTP server on port ${
@@ -28,6 +33,7 @@ console.log(
 );
 const server = new SMTPServer({
   secure: cer && key ? true : false,
+  requestCert: cer && key && cca ? true : false,
   key: key ? fs.readFileSync(key) : undefined,
   cert: cer ? fs.readFileSync(cer) : undefined,
   onData(stream, session, callback) {
