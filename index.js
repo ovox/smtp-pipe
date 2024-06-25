@@ -18,11 +18,13 @@ program.parse(process.argv);
 const options = program.opts();
 
 const pipeProgram = options.pipe;
+const cer = options.cer;
+const key = options.key;
 
 const server = new SMTPServer({
   secure: cer && key ? true : false,
-  key: key ? fs.readFileSync(options.key) : undefined,
-  cert: cer ? fs.readFileSync(options.cer) : undefined,
+  key: key ? fs.readFileSync(key) : undefined,
+  cert: cer ? fs.readFileSync(cer) : undefined,
   onData(stream, session, callback) {
     simpleParser(stream, async (err, parsed) => {
       if (err) {
