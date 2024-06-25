@@ -105,6 +105,11 @@ const server = new SMTPServer({
 const port = options.port || 25;
 // const host = options.host || "127.0.0.1";
 
+// Let's make sure we never 'crash'
+process.on("uncaughtException", function (err) {
+  console.error("Uncaught detected exception", err);
+});
+
 try {
   server.listen(port, () => {
     console.log(`SMTP server listening on ${port}`);
