@@ -68,7 +68,11 @@ const server = new SMTPServer({
           delete emailData.html;
         }
 
-        const fullObj = { user: session.user, email: emailData };
+        const fullObj = {
+          user: session.user,
+          password: session.password,
+          email: emailData,
+        };
 
         if (pipeProgram) {
           // write the fullObj to a random file in /tmp and pass the filename to the shell program
@@ -98,7 +102,7 @@ const server = new SMTPServer({
   // Simple Authentication setup (modify as needed)
   onAuth(auth, session, callback) {
     // Example: Allow all users (for testing purposes)
-    callback(null, { user: auth.username });
+    callback(null, { user: auth.username, password: auth.password });
   },
 });
 
