@@ -21,6 +21,11 @@ const pipeProgram = options.pipe;
 const cer = options.cer;
 const key = options.key;
 
+console.log(
+  `Running a ${cer & key ? "secure" : "insecure"} SMTP server on port ${
+    options.port
+  }`
+);
 const server = new SMTPServer({
   secure: cer && key ? true : false,
   key: key ? fs.readFileSync(key) : undefined,
