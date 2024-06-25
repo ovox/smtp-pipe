@@ -22,7 +22,7 @@ const cer = options.cer;
 const key = options.key;
 
 console.log(
-  `Running a ${cer & key ? "secure" : "insecure"} SMTP server on port ${
+  `Running a ${cer && key ? "secure" : "insecure"} SMTP server on port ${
     options.port
   }`
 );
