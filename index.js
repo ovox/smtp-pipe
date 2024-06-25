@@ -17,6 +17,10 @@ program
   .option("-ca, --ca <cer>", "Path to ca certificates (optional)")
   .option("-s, --server <server>", "SMTP server name (optional)")
   .option(
+    "-fi, --insecure <insecure>",
+    "Force run the server in insecure mode (optional)"
+  )
+  .option(
     "-a, --cca <cca>",
     "Request client certificate true/false (optional)"
   );
@@ -30,6 +34,7 @@ const key = options.key;
 const ca = options.ca;
 const cca = options.cca === "true";
 const name = options.server ?? os.hostname;
+const insecure = options.insecure === "true";
 
 console.log(
   `Running a ${cer && key ? "secure" : "insecure"} SMTP server on port ${
@@ -37,7 +42,7 @@ console.log(
   }`
 );
 const server = new SMTPServer({
-  secure: cer && key ? true : false,
+  secure: cer && key && !insecure ? true : false,
   requestCert: cer && key && cca ? true : false,
   key: key ? fs.readFileSync(key) : undefined,
   cert: cer ? fs.readFileSync(cer) : undefined,
