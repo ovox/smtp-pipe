@@ -10,7 +10,9 @@ program
     "Save the result in a random file and pass the filename to the shell program (optional)"
   )
   .option("-h, --host <host>", "SMTP host")
-  .option("-P, --port <port>", "SMTP port", parseInt);
+  .option("-P, --port <port>", "SMTP port", parseInt)
+  .option("-c, --cer <cer>", "Path to certificate (optional)")
+  .option("-k, --key <key>", "Path to key (optional)");
 
 program.parse(process.argv);
 const options = program.opts();
@@ -18,7 +20,9 @@ const options = program.opts();
 const pipeProgram = options.pipe;
 
 const server = new SMTPServer({
-  secure: false,
+  secure: cer && key ? true : false,
+  key: key ? fs.readFileSync(options.key) : undefined,
+  cert: cer ? fs.readFileSync(options.cer) : undefined,
   onData(stream, session, callback) {
     simpleParser(stream, async (err, parsed) => {
       if (err) {
