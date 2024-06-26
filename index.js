@@ -36,17 +36,30 @@ const cca = options.cca === "true";
 const name = options.server ?? os.hostname;
 const insecure = options.insecure === "true";
 
+const enc = {};
+
+if (cer && key && !insecure) {
+  enc.secure = true;
+}
+if (cer && key && cca) {
+  enc.requestCert = true;
+}
+if (cer && key) {
+  enc.key = fs.readFileSync(key);
+  enc.cert = fs.readFileSync(cer);
+}
+if (ca) {
+  enc.ca = fs.readFileSync(ca);
+}
+
 console.log(
   `Running a ${
     cer && key && !insecure ? "secure" : "insecure"
-  } SMTP server on port ${options.port}`
+  } SMTP server on port ${options.port} with ${JSON.stringify(enc)}`
 );
+
 const server = new SMTPServer({
-  secure: cer && key && !insecure ? true : false,
-  requestCert: cer && key && cca ? true : false,
-  key: key ? fs.readFileSync(key) : undefined,
-  cert: cer ? fs.readFileSync(cer) : undefined,
-  ca: ca ? fs.readFileSync(ca) : undefined,
+  ...enc,
   name: name,
   onData(stream, session, callback) {
     simpleParser(stream, async (err, parsed) => {
@@ -114,7 +127,7 @@ const server = new SMTPServer({
           console.log(JSON.stringify(fullObj, null, 2));
         }
 
-        callback();
+        callback(null, "Message queued as shoutbox");
       } catch (e) {
         console.error(e);
         callback(e);
