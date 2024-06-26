@@ -55,7 +55,7 @@ if (ca) {
 console.log(
   `Running a ${
     cer && key && !insecure ? "secure" : "insecure"
-  } SMTP server on port ${options.port} with ${JSON.stringify(enc)}`
+  } SMTP server on port ${options.port}`
 );
 
 const server = new SMTPServer({
