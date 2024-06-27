@@ -52,6 +52,11 @@ if (ca) {
   enc.ca = fs.readFileSync(ca);
 }
 
+// This is what you want on port :25 probably
+if (!enc.secure && !enc.key) {
+  enc.allowInsecureAuth = true;
+}
+
 console.log(
   `Running a ${
     cer && key && !insecure ? "secure" : "insecure"
@@ -105,8 +110,8 @@ const server = new SMTPServer({
         }
 
         const fullObj = {
-          user: session.user,
-          password: session.password,
+          user: session.user.user,
+          password: session.user.password,
           email: emailData,
         };
 
@@ -138,7 +143,7 @@ const server = new SMTPServer({
   // Simple Authentication setup (modify as needed)
   onAuth(auth, session, callback) {
     // Example: Allow all users (for testing purposes)
-    callback(null, { user: auth.username, password: auth.password });
+    callback(null, { user: { user: auth.username, password: auth.password } });
   },
 });
 

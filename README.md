@@ -35,4 +35,6 @@ node index.js -P 587 -c /etc/letsencrypt/live/mydomaincom/fullchain.pem -k /etc/
 telnet localhost 25
 openssl s_client -starttls smtp -connect mydomain.com:587 -servername mydomain.com
 openssl s_client -connect mydomain.com:465 -servername mydomain.com
+
+swaks --to someone@somewhere.com --from info@mydomain.com --server localhost:25 --auth-user hello --auth-password there
 ```
