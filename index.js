@@ -20,10 +20,8 @@ program
     "-fi, --insecure <insecure>",
     "Force run the server in insecure mode (optional)"
   )
-  .option(
-    "-a, --cca <cca>",
-    "Request client certificate true/false (optional)"
-  );
+  .option("-a, --cca <cca>", "Request client certificate true/false (optional)")
+  .option("-aia, --aia <aia>", "Allow insecure auth (optional)");
 
 program.parse(process.argv);
 const options = program.opts();
@@ -35,6 +33,7 @@ const ca = options.ca;
 const cca = options.cca === "true";
 const name = options.server ?? os.hostname;
 const insecure = options.insecure === "true";
+const aia = options.aia === "true";
 
 const enc = {};
 
@@ -53,7 +52,7 @@ if (ca) {
 }
 
 // This is what you want on port :25 probably
-if (!enc.secure && !enc.key) {
+if ((!enc.secure && !enc.key) || aia) {
   enc.allowInsecureAuth = true;
 }
 
