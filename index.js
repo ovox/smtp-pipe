@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { program } = require("commander");
 const os = require("os");
+const { Resend } = require("../resend-node/dist");
 
 program
   .option(
@@ -21,7 +22,8 @@ program
     "Force run the server in insecure mode (optional)"
   )
   .option("-a, --cca <cca>", "Request client certificate true/false (optional)")
-  .option("-aia, --aia <aia>", "Allow insecure auth (optional)");
+  .option("-aia, --aia <aia>", "Allow insecure auth (optional)")
+  .option("-r --resend <resend>", "Resend via the resend api (optional)");
 
 program.parse(process.argv);
 const options = program.opts();
@@ -34,6 +36,7 @@ const cca = options.cca === "true";
 const name = options.server ?? os.hostname;
 const insecure = options.insecure === "true";
 const aia = options.aia === "true";
+const resendSend = options.resend === "true";
 
 const enc = {};
 
@@ -76,65 +79,108 @@ const server = new SMTPServer({
 
         //   console.log("parsed", parsed, session);
 
-        if (parsed.attachments.length > 0) {
-          // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
-          parsed.attachments.forEach((attachment) => {
-            const filepath = path.join(
-              "/tmp",
-              Math.random().toString(36).substring(2)
-            );
-            console.log('found attachment '+filepath);
-            fs.writeFileSync(filepath, attachment.content);
-            attachment.filepath = filepath;
+        if (resendSend) {
+          const resend = new Resend(session.user.password);
+          const fp = path.join("/tmp", Math.random().toString(36).substring(2));
+          if (parsed.attachments.length > 0) {
+            // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
+            // create the directory fp
+            fs.mkdirSync(fp, { recursive: true });
+            parsed.attachments.forEach((attachment) => {
+              const filepath = path.join(fp, attachment.filename);
+              console.log("found attachment " + filepath);
+              fs.writeFileSync(filepath, attachment.content);
+              attachment.filepath = filepath;
+            });
+          }
+          const emailData = {
+            name: parsed.from.value.map((sender) => sender.name).join(", "),
+            from: parsed.from.value.map((from) => from.address).join(", "),
+            to: parsed.to.value.map((to) => to.address).join(", "),
+            subject: parsed.subject,
+            text: parsed.text,
+            html: parsed.html,
+            attachments: parsed.attachments.map((attachment) => ({
+              filepath: attachment.filepath,
+            })),
+          };
+
+          if (parsed.text && parsed.html) {
+            delete emailData.text;
+          } else if (parsed.text) {
+            delete emailData.html;
+          }
+
+          resend.emails.send(emailData).then((yes, no) => {
+            if (no) {
+              console.error(no);
+            } else {
+              console.log("Email sent ", yes);
+            }
           });
-        }
 
-        // Construct the JSON object from the parsed email
-        const emailData = {
-          name: parsed.from.value.map((sender) => sender.name).join(", "),
-          from: parsed.from.value.map((from) => from.address).join(", "),
-          to: parsed.to.value.map((to) => to.address).join(", "),
-          subject: parsed.subject,
-          text: parsed.text,
-          html: parsed.html,
-          attachments: parsed.attachments.map((attachment) => ({
-            filepath: attachment.filepath,
-            filename: attachment.filename,
-          })),
-        };
-        
-
-        if (parsed.text && parsed.html) {
-          delete emailData.text;
-        } else if (parsed.text) {
-          delete emailData.html;
-        }
-
-        console.log(emailData);
-
-        const fullObj = {
-          user: session.user.user,
-          password: session.user.password,
-          email: emailData,
-        };
-
-        if (pipeProgram) {
-          // write the fullObj to a random file in /tmp and pass the filename to the shell program
-          const rf = `/tmp/${Math.random().toString(36).substring(2)}.json`;
-          fs.writeFileSync(rf, JSON.stringify(fullObj, null, 2));
-          const childProcess = require("child_process");
-          // console.log("Executing the program", pipeProgram, rf);
-          const child = childProcess.spawn(pipeProgram, [rf]);
-          child.on("error", (err) => {
-            console.error("Error executing the program", err);
-          });
-          child.stdout.on("data", (data) => {
-            console.log(`${data}`);
-          });
+          if (parsed.attachments.length > 0) {
+            fs.rmdirSync(fp, { recursive: true });
+          }
         } else {
-          console.log(JSON.stringify(fullObj, null, 2));
-        }
+          if (parsed.attachments.length > 0) {
+            // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
+            parsed.attachments.forEach((attachment) => {
+              const filepath = path.join(
+                "/tmp",
+                Math.random().toString(36).substring(2)
+              );
+              console.log("found attachment " + filepath);
+              fs.writeFileSync(filepath, attachment.content);
+              attachment.filepath = filepath;
+            });
+          }
 
+          // Construct the JSON object from the parsed email
+          const emailData = {
+            name: parsed.from.value.map((sender) => sender.name).join(", "),
+            from: parsed.from.value.map((from) => from.address).join(", "),
+            to: parsed.to.value.map((to) => to.address).join(", "),
+            subject: parsed.subject,
+            text: parsed.text,
+            html: parsed.html,
+            attachments: parsed.attachments.map((attachment) => ({
+              filepath: attachment.filepath,
+              filename: attachment.filename,
+            })),
+          };
+
+          if (parsed.text && parsed.html) {
+            delete emailData.text;
+          } else if (parsed.text) {
+            delete emailData.html;
+          }
+
+          // console.log(emailData);
+
+          const fullObj = {
+            user: session.user.user,
+            password: session.user.password,
+            email: emailData,
+          };
+
+          if (pipeProgram) {
+            // write the fullObj to a random file in /tmp and pass the filename to the shell program
+            const rf = `/tmp/${Math.random().toString(36).substring(2)}.json`;
+            fs.writeFileSync(rf, JSON.stringify(fullObj, null, 2));
+            const childProcess = require("child_process");
+            // console.log("Executing the program", pipeProgram, rf);
+            const child = childProcess.spawn(pipeProgram, [rf]);
+            child.on("error", (err) => {
+              console.error("Error executing the program", err);
+            });
+            child.stdout.on("data", (data) => {
+              console.log(`${data}`);
+            });
+          } else {
+            console.log(JSON.stringify(fullObj, null, 2));
+          }
+        }
         callback(null, "Message queued as shoutbox");
       } catch (e) {
         console.error(e);
