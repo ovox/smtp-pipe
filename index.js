@@ -83,6 +83,7 @@ const server = new SMTPServer({
               "/tmp",
               Math.random().toString(36).substring(2)
             );
+            console.log('found attachment '+filepath);
             fs.writeFileSync(filepath, attachment.content);
             attachment.filepath = filepath;
           });
