@@ -88,7 +88,7 @@ const server = new SMTPServer({
             fs.mkdirSync(fp, { recursive: true });
             parsed.attachments.forEach((attachment) => {
               const filepath = path.join(fp, attachment.filename);
-              console.log("found attachment " + filepath);
+              //console.log("found attachment " + filepath);
               fs.writeFileSync(filepath, attachment.content);
               attachment.filepath = filepath;
             });
@@ -123,14 +123,13 @@ const server = new SMTPServer({
             fs.rmdirSync(fp, { recursive: true });
           }
         } else {
+          const fp = path.join("/tmp", Math.random().toString(36).substring(2));
           if (parsed.attachments.length > 0) {
             // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
+            fs.mkdirSync(fp, { recursive: true });
             parsed.attachments.forEach((attachment) => {
-              const filepath = path.join(
-                "/tmp",
-                Math.random().toString(36).substring(2)
-              );
-              console.log("found attachment " + filepath);
+              const filepath = path.join(fp, attachment.filename);
+              // console.log("found attachment " + filepath);
               fs.writeFileSync(filepath, attachment.content);
               attachment.filepath = filepath;
             });
@@ -146,7 +145,7 @@ const server = new SMTPServer({
             html: parsed.html,
             attachments: parsed.attachments.map((attachment) => ({
               filepath: attachment.filepath,
-              filename: attachment.filename,
+              // filename: attachment.filename,
             })),
           };
 
@@ -180,6 +179,10 @@ const server = new SMTPServer({
           } else {
             console.log(JSON.stringify(fullObj, null, 2));
           }
+        }
+
+        if (parsed.attachments.length > 0) {
+          fs.rmdirSync(fp, { recursive: true });
         }
         callback(null, "Message queued as shoutbox");
       } catch (e) {
