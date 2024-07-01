@@ -102,12 +102,15 @@ const server = new SMTPServer({
             filename: attachment.filename,
           })),
         };
+        
 
         if (parsed.text && parsed.html) {
           delete emailData.text;
         } else if (parsed.text) {
           delete emailData.html;
         }
+
+        console.log(emailData);
 
         const fullObj = {
           user: session.user.user,
