@@ -179,11 +179,11 @@ const server = new SMTPServer({
           } else {
             console.log(JSON.stringify(fullObj, null, 2));
           }
+          if (parsed.attachments.length > 0) {
+            fs.rmdirSync(fp, { recursive: true });
+          }
         }
 
-        if (parsed.attachments.length > 0) {
-          fs.rmdirSync(fp, { recursive: true });
-        }
         callback(null, "Message queued as shoutbox");
       } catch (e) {
         console.error(e);
