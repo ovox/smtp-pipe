@@ -396,7 +396,7 @@ if (refreshKeys) {
     } catch (error) {
       console.error("Error refreshing server:", error);
     }
-  }, 15 * 1000);
+  }, refreshKeys * 60 * 60 * 1000);
 }
 
 async function initialize() {
