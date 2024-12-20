@@ -6,15 +6,16 @@ const { program } = require("commander");
 const os = require("os");
 const { Resend } = require("../resend-node/dist");
 const net = require("net");
+const tls = require('tls');
 
 // Add global error handlers to prevent crashes
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
   // Don't exit the process, just log the error
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
   // Don't exit the process, just log the error
 });
 
@@ -62,6 +63,18 @@ function loadEncryptionConfig() {
     enc = {};
     if (cer && key && !insecure) {
       enc.secure = true;
+      // Add explicit TLS options to handle protocol fallback
+      enc.tls = {
+        minVersion: 'TLSv1.2',
+        maxVersion: 'TLSv1.3',
+        secureProtocol: 'TLS_method',
+        secureOptions: tls.constants.SSL_OP_NO_SSLv2 | 
+                      tls.constants.SSL_OP_NO_SSLv3 |
+                      tls.constants.SSL_OP_NO_TLSv1 |
+                      tls.constants.SSL_OP_NO_TLSv1_1,
+        rejectUnauthorized: false, // Allow self-signed certificates
+        ciphers: 'HIGH:!aNULL:!MD5:!RC4', // Strong ciphers only
+      };
     }
     if (cer && key && cca) {
       enc.requestCert = true;
@@ -78,7 +91,7 @@ function loadEncryptionConfig() {
     }
     console.log(`Encryption config reloaded at ${new Date().toISOString()}`);
   } catch (error) {
-    console.error('Error loading encryption config:', error);
+    console.error("Error loading encryption config:", error);
     // Use default insecure config as fallback
     enc = { allowInsecureAuth: true };
   }
@@ -93,9 +106,16 @@ console.log(
 );
 
 function createServer() {
-  return new SMTPServer({
+  const server = new SMTPServer({
     ...enc,
     name: name,
+    // Add TLS-specific handlers
+    onConnect(session, callback) {
+      callback(); // Accept the connection
+    },
+    onSecure(socket, session, callback) {
+      callback(null); // Accept the TLS connection
+    },
     onData(stream, session, callback) {
       simpleParser(stream, async (err, parsed) => {
         try {
@@ -120,7 +140,7 @@ function createServer() {
                   attachment.filepath = filepath;
                 });
               } catch (error) {
-                console.error('Error handling attachments:', error);
+                console.error("Error handling attachments:", error);
                 callback(error);
                 return;
               }
@@ -147,7 +167,7 @@ function createServer() {
               const result = await resend.emails.send(emailData);
               console.log("Email sent ", result);
             } catch (error) {
-              console.error('Error sending email:', error);
+              console.error("Error sending email:", error);
               // Don't throw, just log the error
             }
 
@@ -155,7 +175,7 @@ function createServer() {
               try {
                 fs.rmdirSync(fp, { recursive: true });
               } catch (error) {
-                console.error('Error cleaning up attachments:', error);
+                console.error("Error cleaning up attachments:", error);
                 // Don't throw, just log the error
               }
             }
@@ -173,7 +193,7 @@ function createServer() {
                   attachment.filepath = filepath;
                 });
               } catch (error) {
-                console.error('Error handling attachments:', error);
+                console.error("Error handling attachments:", error);
                 callback(error);
                 return;
               }
@@ -205,30 +225,32 @@ function createServer() {
 
             if (pipeProgram) {
               try {
-                const rf = `/tmp/${Math.random().toString(36).substring(2)}.json`;
+                const rf = `/tmp/${Math.random()
+                  .toString(36)
+                  .substring(2)}.json`;
                 fs.writeFileSync(rf, JSON.stringify(fullObj, null, 2));
                 const childProcess = require("child_process");
                 const child = childProcess.spawn(pipeProgram, [rf]);
-                
+
                 child.on("error", (err) => {
                   console.error("Error executing the program", err);
                   // Don't throw, just log the error
                 });
-                
+
                 child.stdout.on("data", (data) => {
                   console.log(`${data}`);
                 });
 
                 // Clean up the temp file after the child process exits
-                child.on('exit', () => {
+                child.on("exit", () => {
                   try {
                     fs.unlinkSync(rf);
                   } catch (error) {
-                    console.error('Error cleaning up temp file:', error);
+                    console.error("Error cleaning up temp file:", error);
                   }
                 });
               } catch (error) {
-                console.error('Error in pipe program execution:', error);
+                console.error("Error in pipe program execution:", error);
                 // Don't throw, just log the error
               }
             } else {
@@ -239,7 +261,7 @@ function createServer() {
               try {
                 fs.rmdirSync(fp, { recursive: true });
               } catch (error) {
-                console.error('Error cleaning up attachments:', error);
+                console.error("Error cleaning up attachments:", error);
                 // Don't throw, just log the error
               }
             }
@@ -247,7 +269,7 @@ function createServer() {
 
           callback(null, "Message queued as shoutbox");
         } catch (e) {
-          console.error('Error in onData handler:', e);
+          console.error("Error in onData handler:", e);
           callback(e);
         }
       });
@@ -259,11 +281,23 @@ function createServer() {
           user: { user: auth.username, password: auth.password },
         });
       } catch (error) {
-        console.error('Error in authentication:', error);
+        console.error("Error in authentication:", error);
         callback(error);
       }
     },
   });
+
+  // Add specific handler for TLS-related errors
+  server.on("error", (err) => {
+    if (err.code === "ERR_SSL_INAPPROPRIATE_FALLBACK") {
+      console.warn("TLS Fallback Warning:", err.message);
+      // Don't crash the server, just log the warning
+    } else {
+      console.error("SMTP Server Error:", err);
+    }
+  });
+
+  return server;
 }
 
 let server = createServer();
@@ -274,8 +308,8 @@ const POOL_SIZE = 2;
 const proxyServer = net.createServer();
 
 // Add error handler for proxy server
-proxyServer.on('error', (error) => {
-  console.error('Proxy server error:', error);
+proxyServer.on("error", (error) => {
+  console.error("Proxy server error:", error);
   // Don't crash, attempt to recover
   setTimeout(() => {
     try {
@@ -283,7 +317,7 @@ proxyServer.on('error', (error) => {
         startProxyServer();
       });
     } catch (e) {
-      console.error('Error recovering proxy server:', e);
+      console.error("Error recovering proxy server:", e);
     }
   }, 5000);
 });
@@ -298,7 +332,7 @@ function startProxyServer() {
       console.log(`Proxy server listening on port ${port}`);
     });
   } catch (error) {
-    console.error('Error starting proxy server:', error);
+    console.error("Error starting proxy server:", error);
     // Attempt to restart after delay
     setTimeout(startProxyServer, 5000);
   }
@@ -341,7 +375,7 @@ function handleProxyConnection(socket) {
       socket.end();
     });
   } catch (error) {
-    console.error('Error in proxy connection handler:', error);
+    console.error("Error in proxy connection handler:", error);
     socket.end("421 Service not available, closing transmission channel\r\n");
   }
 }
@@ -361,7 +395,7 @@ class ServerPool {
         await this.addServer();
       }
     } catch (error) {
-      console.error('Error initializing server pool:', error);
+      console.error("Error initializing server pool:", error);
       // Attempt recovery by retrying failed servers
       this.retryFailedServers();
     }
@@ -372,8 +406,8 @@ class ServerPool {
       try {
         await this.addServer();
       } catch (error) {
-        console.error('Error adding server during retry:', error);
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        console.error("Error adding server during retry:", error);
+        await new Promise((resolve) => setTimeout(resolve, 5000));
       }
     }
   }
@@ -398,10 +432,10 @@ class ServerPool {
         });
 
         // Add error handler for the server
-        server.on('error', (error) => {
-          console.error('SMTP server error:', error);
+        server.on("error", (error) => {
+          console.error("SMTP server error:", error);
           // Attempt to refresh this server
-          const index = this.servers.findIndex(s => s.server === server);
+          const index = this.servers.findIndex((s) => s.server === server);
           if (index !== -1) {
             this.refreshServer(index).catch(console.error);
           }
@@ -411,7 +445,7 @@ class ServerPool {
       this.servers.push({ server, port: serverPort });
       console.log(`Added new SMTP server on port ${serverPort}`);
     } catch (error) {
-      console.error('Error adding server:', error);
+      console.error("Error adding server:", error);
       throw error; // Propagate error for retry mechanism
     }
   }
@@ -455,13 +489,13 @@ class ServerPool {
             console.log(`Closed old SMTP server on port ${oldServer.port}`);
           });
         } catch (error) {
-          console.error('Error closing old server:', error);
+          console.error("Error closing old server:", error);
         }
       }, 30000); // 30 seconds grace period
     } catch (error) {
       console.error("Error creating new server during refresh:", error);
       // Keep the old server running if refresh failed
-      console.log('Keeping old server running due to refresh failure');
+      console.log("Keeping old server running due to refresh failure");
     }
   }
 
@@ -471,7 +505,7 @@ class ServerPool {
       try {
         await this.refreshServer(i);
         // Add delay between refreshes to prevent overwhelming the system
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       } catch (error) {
         console.error(`Error refreshing server ${i}:`, error);
       }
@@ -512,7 +546,7 @@ async function initialize() {
   } catch (error) {
     console.error("Error initializing servers:", error);
     // Instead of exiting, attempt recovery
-    console.log('Attempting to recover from initialization failure...');
+    console.log("Attempting to recover from initialization failure...");
     setTimeout(initialize, 5000);
   }
 }
