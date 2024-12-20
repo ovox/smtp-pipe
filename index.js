@@ -7,6 +7,7 @@ const os = require("os");
 const { Resend } = require("../resend-node/dist");
 const net = require("net");
 const tls = require('tls');
+const crypto = require('crypto');
 
 // Add global error handlers to prevent crashes
 process.on("uncaughtException", (error) => {
@@ -68,10 +69,10 @@ function loadEncryptionConfig() {
         minVersion: 'TLSv1.2',
         maxVersion: 'TLSv1.3',
         secureProtocol: 'TLS_method',
-        secureOptions: tls.constants.SSL_OP_NO_SSLv2 | 
-                      tls.constants.SSL_OP_NO_SSLv3 |
-                      tls.constants.SSL_OP_NO_TLSv1 |
-                      tls.constants.SSL_OP_NO_TLSv1_1,
+        secureOptions: crypto.constants.SSL_OP_NO_SSLv2 | 
+                      crypto.constants.SSL_OP_NO_SSLv3 |
+                      crypto.constants.SSL_OP_NO_TLSv1 |
+                      crypto.constants.SSL_OP_NO_TLSv1_1,
         rejectUnauthorized: false, // Allow self-signed certificates
         ciphers: 'HIGH:!aNULL:!MD5:!RC4', // Strong ciphers only
       };
