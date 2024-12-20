@@ -7,6 +7,17 @@ const os = require("os");
 const { Resend } = require("../resend-node/dist");
 const net = require("net");
 
+// Add global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Don't exit the process, just log the error
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit the process, just log the error
+});
+
 program
   .option(
     "-p, --pipe <program>",
@@ -47,24 +58,30 @@ const refreshKeys = options.refreshKeys;
 
 let enc = {};
 function loadEncryptionConfig() {
-  enc = {};
-  if (cer && key && !insecure) {
-    enc.secure = true;
+  try {
+    enc = {};
+    if (cer && key && !insecure) {
+      enc.secure = true;
+    }
+    if (cer && key && cca) {
+      enc.requestCert = true;
+    }
+    if (cer && key) {
+      enc.key = fs.readFileSync(key);
+      enc.cert = fs.readFileSync(cer);
+    }
+    if (ca) {
+      enc.ca = fs.readFileSync(ca);
+    }
+    if ((!enc.secure && !enc.key) || aia) {
+      enc.allowInsecureAuth = true;
+    }
+    console.log(`Encryption config reloaded at ${new Date().toISOString()}`);
+  } catch (error) {
+    console.error('Error loading encryption config:', error);
+    // Use default insecure config as fallback
+    enc = { allowInsecureAuth: true };
   }
-  if (cer && key && cca) {
-    enc.requestCert = true;
-  }
-  if (cer && key) {
-    enc.key = fs.readFileSync(key);
-    enc.cert = fs.readFileSync(cer);
-  }
-  if (ca) {
-    enc.ca = fs.readFileSync(ca);
-  }
-  if ((!enc.secure && !enc.key) || aia) {
-    enc.allowInsecureAuth = true;
-  }
-  console.log(`Encryption config reloaded at ${new Date().toISOString()}`);
 }
 
 loadEncryptionConfig();
@@ -88,8 +105,6 @@ function createServer() {
             return;
           }
 
-          //   console.log("parsed", parsed, session);
-
           if (resendSend) {
             const resend = new Resend(session.user.password);
             const fp = path.join(
@@ -97,15 +112,18 @@ function createServer() {
               Math.random().toString(36).substring(2)
             );
             if (parsed.attachments.length > 0) {
-              // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
-              // create the directory fp
-              fs.mkdirSync(fp, { recursive: true });
-              parsed.attachments.forEach((attachment) => {
-                const filepath = path.join(fp, attachment.filename);
-                //console.log("found attachment " + filepath);
-                fs.writeFileSync(filepath, attachment.content);
-                attachment.filepath = filepath;
-              });
+              try {
+                fs.mkdirSync(fp, { recursive: true });
+                parsed.attachments.forEach((attachment) => {
+                  const filepath = path.join(fp, attachment.filename);
+                  fs.writeFileSync(filepath, attachment.content);
+                  attachment.filepath = filepath;
+                });
+              } catch (error) {
+                console.error('Error handling attachments:', error);
+                callback(error);
+                return;
+              }
             }
             const emailData = {
               name: parsed.from.value.map((sender) => sender.name).join(", "),
@@ -125,16 +143,21 @@ function createServer() {
               delete emailData.html;
             }
 
-            resend.emails.send(emailData).then((yes, no) => {
-              if (no) {
-                console.error(no);
-              } else {
-                console.log("Email sent ", yes);
-              }
-            });
+            try {
+              const result = await resend.emails.send(emailData);
+              console.log("Email sent ", result);
+            } catch (error) {
+              console.error('Error sending email:', error);
+              // Don't throw, just log the error
+            }
 
             if (parsed.attachments.length > 0) {
-              fs.rmdirSync(fp, { recursive: true });
+              try {
+                fs.rmdirSync(fp, { recursive: true });
+              } catch (error) {
+                console.error('Error cleaning up attachments:', error);
+                // Don't throw, just log the error
+              }
             }
           } else {
             const fp = path.join(
@@ -142,17 +165,20 @@ function createServer() {
               Math.random().toString(36).substring(2)
             );
             if (parsed.attachments.length > 0) {
-              // iterate over the attachments, write them in a /tmp random file and replace the attachment.filename with the real actual pathp;
-              fs.mkdirSync(fp, { recursive: true });
-              parsed.attachments.forEach((attachment) => {
-                const filepath = path.join(fp, attachment.filename);
-                // console.log("found attachment " + filepath);
-                fs.writeFileSync(filepath, attachment.content);
-                attachment.filepath = filepath;
-              });
+              try {
+                fs.mkdirSync(fp, { recursive: true });
+                parsed.attachments.forEach((attachment) => {
+                  const filepath = path.join(fp, attachment.filename);
+                  fs.writeFileSync(filepath, attachment.content);
+                  attachment.filepath = filepath;
+                });
+              } catch (error) {
+                console.error('Error handling attachments:', error);
+                callback(error);
+                return;
+              }
             }
 
-            // Construct the JSON object from the parsed email
             const emailData = {
               name: parsed.from.value.map((sender) => sender.name).join(", "),
               from: parsed.from.value.map((from) => from.address).join(", "),
@@ -162,7 +188,6 @@ function createServer() {
               html: parsed.html,
               attachments: parsed.attachments.map((attachment) => ({
                 filepath: attachment.filepath,
-                // filename: attachment.filename,
               })),
             };
 
@@ -171,8 +196,6 @@ function createServer() {
             } else if (parsed.text) {
               delete emailData.html;
             }
-
-            // console.log(emailData);
 
             const fullObj = {
               user: session.user.user,
@@ -181,40 +204,64 @@ function createServer() {
             };
 
             if (pipeProgram) {
-              // write the fullObj to a random file in /tmp and pass the filename to the shell program
-              const rf = `/tmp/${Math.random().toString(36).substring(2)}.json`;
-              fs.writeFileSync(rf, JSON.stringify(fullObj, null, 2));
-              const childProcess = require("child_process");
-              // console.log("Executing the program", pipeProgram, rf);
-              const child = childProcess.spawn(pipeProgram, [rf]);
-              child.on("error", (err) => {
-                console.error("Error executing the program", err);
-              });
-              child.stdout.on("data", (data) => {
-                console.log(`${data}`);
-              });
+              try {
+                const rf = `/tmp/${Math.random().toString(36).substring(2)}.json`;
+                fs.writeFileSync(rf, JSON.stringify(fullObj, null, 2));
+                const childProcess = require("child_process");
+                const child = childProcess.spawn(pipeProgram, [rf]);
+                
+                child.on("error", (err) => {
+                  console.error("Error executing the program", err);
+                  // Don't throw, just log the error
+                });
+                
+                child.stdout.on("data", (data) => {
+                  console.log(`${data}`);
+                });
+
+                // Clean up the temp file after the child process exits
+                child.on('exit', () => {
+                  try {
+                    fs.unlinkSync(rf);
+                  } catch (error) {
+                    console.error('Error cleaning up temp file:', error);
+                  }
+                });
+              } catch (error) {
+                console.error('Error in pipe program execution:', error);
+                // Don't throw, just log the error
+              }
             } else {
               console.log(JSON.stringify(fullObj, null, 2));
             }
+
             if (parsed.attachments.length > 0) {
-              fs.rmdirSync(fp, { recursive: true });
+              try {
+                fs.rmdirSync(fp, { recursive: true });
+              } catch (error) {
+                console.error('Error cleaning up attachments:', error);
+                // Don't throw, just log the error
+              }
             }
           }
 
           callback(null, "Message queued as shoutbox");
         } catch (e) {
-          console.error(e);
+          console.error('Error in onData handler:', e);
           callback(e);
         }
       });
     },
 
-    // Simple Authentication setup (modify as needed)
     onAuth(auth, session, callback) {
-      // Example: Allow all users (for testing purposes)
-      callback(null, {
-        user: { user: auth.username, password: auth.password },
-      });
+      try {
+        callback(null, {
+          user: { user: auth.username, password: auth.password },
+        });
+      } catch (error) {
+        console.error('Error in authentication:', error);
+        callback(error);
+      }
     },
   });
 }
@@ -222,58 +269,83 @@ function createServer() {
 let server = createServer();
 
 const port = options.port || 25;
-// const host = options.host || "127.0.0.1";
 const POOL_SIZE = 2;
 
-// Create a TCP proxy server
 const proxyServer = net.createServer();
+
+// Add error handler for proxy server
+proxyServer.on('error', (error) => {
+  console.error('Proxy server error:', error);
+  // Don't crash, attempt to recover
+  setTimeout(() => {
+    try {
+      proxyServer.close(() => {
+        startProxyServer();
+      });
+    } catch (e) {
+      console.error('Error recovering proxy server:', e);
+    }
+  }, 5000);
+});
 
 let activeServer = createServer();
 let standbyServer = null;
 let activePort = null;
 
 function startProxyServer() {
-  proxyServer.listen(port, () => {
-    console.log(`Proxy server listening on port ${port}`);
-  });
+  try {
+    proxyServer.listen(port, () => {
+      console.log(`Proxy server listening on port ${port}`);
+    });
+  } catch (error) {
+    console.error('Error starting proxy server:', error);
+    // Attempt to restart after delay
+    setTimeout(startProxyServer, 5000);
+  }
 }
 
 function handleProxyConnection(socket) {
-  const serverInfo = serverPool.getNextServer();
-  if (!serverInfo) {
-    console.error("No SMTP servers available");
-    socket.end("421 Service not available, closing transmission channel\r\n");
-    return;
-  }
-
-  const target = net.connect({ port: serverInfo.port }, () => {
-    console.log(`Connected to SMTP server on port ${serverInfo.port}`);
-    socket.pipe(target).pipe(socket);
-  });
-
-  target.on("error", (err) => {
-    console.error(
-      `Error connecting to SMTP server on port ${serverInfo.port}:`,
-      err
-    );
-    socket.end("421 Service not available, closing transmission channel\r\n");
-  });
-
-  socket.on("error", (err) => {
-    if (err.code !== "ECONNRESET") {
-      console.error("Client socket error:", err);
+  try {
+    const serverInfo = serverPool.getNextServer();
+    if (!serverInfo) {
+      console.error("No SMTP servers available");
+      socket.end("421 Service not available, closing transmission channel\r\n");
+      return;
     }
-    target.destroy();
-  });
 
-  socket.on("end", () => {
-    target.end();
-  });
+    const target = net.connect({ port: serverInfo.port }, () => {
+      console.log(`Connected to SMTP server on port ${serverInfo.port}`);
+      socket.pipe(target).pipe(socket);
+    });
 
-  target.on("end", () => {
-    socket.end();
-  });
+    target.on("error", (err) => {
+      console.error(
+        `Error connecting to SMTP server on port ${serverInfo.port}:`,
+        err
+      );
+      socket.end("421 Service not available, closing transmission channel\r\n");
+    });
+
+    socket.on("error", (err) => {
+      if (err.code !== "ECONNRESET") {
+        console.error("Client socket error:", err);
+      }
+      target.destroy();
+    });
+
+    socket.on("end", () => {
+      target.end();
+    });
+
+    target.on("end", () => {
+      socket.end();
+    });
+  } catch (error) {
+    console.error('Error in proxy connection handler:', error);
+    socket.end("421 Service not available, closing transmission channel\r\n");
+  }
 }
+
 proxyServer.on("connection", handleProxyConnection);
 
 class ServerPool {
@@ -284,8 +356,25 @@ class ServerPool {
   }
 
   async initialize() {
-    for (let i = 0; i < this.size; i++) {
-      await this.addServer();
+    try {
+      for (let i = 0; i < this.size; i++) {
+        await this.addServer();
+      }
+    } catch (error) {
+      console.error('Error initializing server pool:', error);
+      // Attempt recovery by retrying failed servers
+      this.retryFailedServers();
+    }
+  }
+
+  async retryFailedServers() {
+    while (this.servers.length < this.size) {
+      try {
+        await this.addServer();
+      } catch (error) {
+        console.error('Error adding server during retry:', error);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
     }
   }
 
@@ -297,19 +386,34 @@ class ServerPool {
       return;
     }
 
-    const server = createServer();
-    const serverPort = await new Promise((resolve, reject) => {
-      server.listen(0, (err) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(server.server.address().port);
-        }
-      });
-    });
+    try {
+      const server = createServer();
+      const serverPort = await new Promise((resolve, reject) => {
+        server.listen(0, (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(server.server.address().port);
+          }
+        });
 
-    this.servers.push({ server, port: serverPort });
-    console.log(`Added new SMTP server on port ${serverPort}`);
+        // Add error handler for the server
+        server.on('error', (error) => {
+          console.error('SMTP server error:', error);
+          // Attempt to refresh this server
+          const index = this.servers.findIndex(s => s.server === server);
+          if (index !== -1) {
+            this.refreshServer(index).catch(console.error);
+          }
+        });
+      });
+
+      this.servers.push({ server, port: serverPort });
+      console.log(`Added new SMTP server on port ${serverPort}`);
+    } catch (error) {
+      console.error('Error adding server:', error);
+      throw error; // Propagate error for retry mechanism
+    }
   }
 
   getNextServer() {
@@ -346,19 +450,31 @@ class ServerPool {
 
       // Close the old server after a grace period
       setTimeout(() => {
-        oldServer.server.close(() => {
-          console.log(`Closed old SMTP server on port ${oldServer.port}`);
-        });
+        try {
+          oldServer.server.close(() => {
+            console.log(`Closed old SMTP server on port ${oldServer.port}`);
+          });
+        } catch (error) {
+          console.error('Error closing old server:', error);
+        }
       }, 30000); // 30 seconds grace period
     } catch (error) {
       console.error("Error creating new server during refresh:", error);
+      // Keep the old server running if refresh failed
+      console.log('Keeping old server running due to refresh failure');
     }
   }
 
   async refreshAll() {
     console.log("Refreshing all servers...");
     for (let i = 0; i < this.servers.length; i++) {
-      await this.refreshServer(i);
+      try {
+        await this.refreshServer(i);
+        // Add delay between refreshes to prevent overwhelming the system
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (error) {
+        console.error(`Error refreshing server ${i}:`, error);
+      }
     }
     console.log("All servers refreshed");
   }
@@ -366,22 +482,10 @@ class ServerPool {
 
 const serverPool = new ServerPool(POOL_SIZE);
 
-function startSMTPServer(server) {
-  return new Promise((resolve, reject) => {
-    server.listen(0, () => {
-      // Use port 0 to let the OS assign a random available port
-      const port = server.server.address().port;
-      console.log(`SMTP server listening on port ${port}`);
-      resolve(port);
-    });
-  });
-}
-
 async function refreshServer() {
   console.log("Refreshing servers with new encryption config...");
-  loadEncryptionConfig();
-
   try {
+    loadEncryptionConfig();
     await serverPool.refreshAll();
     console.log("Server refresh completed successfully");
   } catch (error) {
@@ -405,9 +509,11 @@ async function initialize() {
     proxyServer.listen(port, () => {
       console.log(`Proxy server listening on port ${port}`);
     });
-  } catch (e) {
-    console.error("Error initializing servers:", e);
-    process.exit(1);
+  } catch (error) {
+    console.error("Error initializing servers:", error);
+    // Instead of exiting, attempt recovery
+    console.log('Attempting to recover from initialization failure...');
+    setTimeout(initialize, 5000);
   }
 }
 
