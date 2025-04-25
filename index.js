@@ -2,384 +2,376 @@ const { SMTPServer } = require("smtp-server");
 const { simpleParser } = require("mailparser");
 const fs = require("fs");
 const path = require("path");
-const { program } = require("commander");
 const os = require("os");
-const { Resend } = require("../resend-node/dist"); // Assuming resend-node is one level up
 const net = require("net");
 const tls = require('tls');
 const crypto = require('crypto');
-const { spawn } = require('child_process'); // Import spawn directly for clarity
+const { spawn } = require('child_process');
 
-// Add global error handlers to prevent crashes
+// --- Argument Parsing (Replaces global Commander reliance for core settings) ---
+let settings = {
+    port: null, // Default set later based on security
+    host: undefined, // Listen on all interfaces by default
+    serverName: os.hostname(),
+    certPath: null,
+    keyPath: null,
+    caPath: null,
+    forceInsecure: false, // From -fi flag
+    requestClientCert: false, // From -a flag
+    allowInsecureAuthGlobal: false, // From -aia flag
+    pipeProgram: null, // From -p flag
+    resendSend: false, // From -r flag (NOTE: Not implemented in original, added placeholder)
+    refreshKeys: null // From -rk flag
+};
+
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+        case '-P': case '--port': settings.port = parseInt(args[++i]); break;
+        case '-h': case '--host': settings.host = args[++i]; break;
+        case '-s': case '--server': settings.serverName = args[++i]; break;
+        case '-c': case '--cer': settings.certPath = args[++i]; break;
+        case '-k': case '--key': settings.keyPath = args[++i]; break;
+        case '-ca': case '--ca': settings.caPath = args[++i]; break;
+        case '-fi': case '--insecure': settings.forceInsecure = (args[++i] === 'true'); break;
+        case '-a': case '--cca': settings.requestClientCert = (args[++i] === 'true'); break;
+        case '-aia': case '--aia': settings.allowInsecureAuthGlobal = (args[++i] === 'true'); break;
+        case '-p': case '--pipe': settings.pipeProgram = args[++i]; break;
+        case '-r': case '--resend': settings.resendSend = (args[++i] === 'true'); break;
+        case '-rk': case '--refresh-keys': settings.refreshKeys = parseInt(args[++i]); break;
+        default:
+          // console.warn(`Ignoring unknown argument: ${args[i]}`);
+          // Basic handling for flags without values, or skip pairs if value is missing
+          if (args[i].startsWith('-') && (i + 1 >= args.length || args[i+1].startsWith('-'))) {
+             // Flag without value or next arg is another flag
+          } else if (args[i].startsWith('-')) {
+             i++; // Skip the assumed value
+          }
+          break;
+    }
+}
+// --- End Argument Parsing ---
+
+// --- Global Error Handlers ---
 process.on("uncaughtException", (error) => {
-  console.error("Uncaught Exception:", error);
-  // Log the error, but consider if you might want to restart the process
-  // in some cases, depending on the error severity.
+  console.error(`[${new Date().toISOString()}] Uncaught Exception:`, error);
 });
-
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  // Log the error.
+  console.error(`[${new Date().toISOString()}] Unhandled Rejection at:`, promise, "reason:", reason);
 });
+// --- End Global Error Handlers ---
 
-program
-  .option(
-    "-p, --pipe <program>",
-    "Save the result in a random file and pass the filename to the shell program (optional)"
-  )
-  .option("-h, --host <host>", "SMTP host")
-  .option("-P, --port <port>", "SMTP port", parseInt)
-  .option("-c, --cer <cer>", "Path to certificate (optional)")
-  .option("-k, --key <key>", "Path to key (optional)")
-  .option("-ca, --ca <cer>", "Path to ca certificates (optional)")
-  .option("-s, --server <server>", "SMTP server name (optional)")
-  .option(
-    "-fi, --insecure <insecure>",
-    "Force run the server in insecure mode (optional)"
-  )
-  .option("-a, --cca <cca>", "Request client certificate true/false (optional)")
-  .option("-aia, --aia <aia>", "Allow insecure auth (optional)")
-  .option("-r --resend <resend>", "Resend via the resend api (optional)")
-  .option(
-    "-rk, --refresh-keys <hours>",
-    "Refresh keys every X hours",
-    parseInt
-  );
 
-program.parse(process.argv);
-const options = program.opts();
+// --- TLS Configuration Loading Function ---
+let currentTlsConfig = {}; // Store the currently active TLS config for SMTPServer
 
-const pipeProgram = options.pipe;
-const cer = options.cer;
-const key = options.key;
-const ca = options.ca;
-const cca = options.cca === "true";
-const name = options.server ?? os.hostname();
-const insecure = options.insecure === "true";
-const aia = options.aia === "true";
-const resendSend = options.resend === "true";
-const refreshKeys = options.refreshKeys;
-
-let enc = {};
-function loadEncryptionConfig() {
+function loadEncryptionConfigBasedOnArgs() {
+  const newConfig = {}; // Build new config locally
   try {
-    enc = {};
-    if (cer && key && !insecure) {
-      enc.secure = true;
-      enc.key = fs.readFileSync(key); // Load key first in case cert needs it
-      enc.cert = fs.readFileSync(cer);
-      enc.tls = {
+    console.log(`Loading encryption config based on args: cert=${settings.certPath}, key=${settings.keyPath}, forceInsecure=${settings.forceInsecure}`);
+
+    // Determine security based on presence of cert/key args AND forceInsecure flag
+    if (settings.certPath && settings.keyPath && !settings.forceInsecure) {
+      console.log("Attempting to load certificate and key for TLS/STARTTLS...");
+      // These will throw an error if files don't exist or aren't readable
+      newConfig.key = fs.readFileSync(settings.keyPath);
+      newConfig.cert = fs.readFileSync(settings.certPath);
+      console.log("Certificate and key loaded successfully.");
+
+      // STARTTLS configuration
+      newConfig.secure = false; // Server starts plain text
+      newConfig.starttls = true; // Advertise STARTTLS capability
+      newConfig.tls = { // Define TLS protocol options
         minVersion: 'TLSv1.2',
-        maxVersion: 'TLSv1.3',
-        // secureProtocol: 'TLS_method', // Generally not needed unless specific protocols MUST be used
-        // secureOptions: crypto.constants.SSL_OP_NO_SSLv2 | // Redundant with minVersion
-        //               crypto.constants.SSL_OP_NO_SSLv3 |
-        //               crypto.constants.SSL_OP_NO_TLSv1 |
-        //               crypto.constants.SSL_OP_NO_TLSv1_1,
-        rejectUnauthorized: false, // Be cautious with this in production
-        ciphers: 'HIGH:!aNULL:!MD5:!RC4:!3DES:!DES', // Added !3DES:!DES for better security
+        // maxVersion: 'TLSv1.3', // Often best to let Node negotiate highest
+        rejectUnauthorized: false, // Allow self-signed/unverified CAs - USE WITH CAUTION in production
+        ciphers: [ // Prioritize modern ciphers
+            'ECDHE-ECDSA-AES256-GCM-SHA384',
+            'ECDHE-RSA-AES256-GCM-SHA384',
+            'ECDHE-ECDSA-CHACHA20-POLY1305',
+            'ECDHE-RSA-CHACHA20-POLY1305',
+            'ECDHE-ECDSA-AES128-GCM-SHA256',
+            'ECDHE-RSA-AES128-GCM-SHA256',
+            'DHE-RSA-AES256-GCM-SHA384', // Less preferred but included
+            'DHE-RSA-AES128-GCM-SHA256',
+            '!aNULL', '!eNULL', '!EXPORT', '!DES', '!RC4', '!MD5', '!PSK', '!SRP', '!CAMELLIA' // Exclusions
+        ].join(':'),
+        // secureOptions: crypto.constants.SSL_OP_NO_TLSv1 | crypto.constants.SSL_OP_NO_TLSv1_1 // Redundant with minVersion
       };
-      if (cca) { // Request client cert only if TLS is active
-        enc.requestCert = true;
+
+      // Client Certificate Authentication (CCA) options
+      if (settings.requestClientCert) {
+          newConfig.requestCert = true;
+          // newConfig.requireTLS = true; // Usually implied by requestCert/ca
+          if (settings.caPath) {
+              try {
+                  newConfig.ca = fs.readFileSync(settings.caPath);
+                  console.log("CA certificate loaded for client verification.");
+                  // If CA is provided, usually want to reject clients without a valid cert
+                  newConfig.tls.rejectUnauthorized = true; // Override previous setting
+                  // newConfig.requireCert = true; // May not be needed, SMTPServer might handle
+              } catch (caError) {
+                  console.error(`Error loading CA file: ${caError.message}. Client cert verification may fail.`);
+              }
+          } else {
+              console.warn("Requesting client cert but no CA path provided. Verification might not work as expected.");
+              // If no CA, rejectUnauthorized should likely remain false unless self-signed client certs are expected
+              newConfig.tls.rejectUnauthorized = false;
+          }
+          console.log(`Client certificate requested: ${newConfig.requestCert}, CA specified: ${!!newConfig.ca}`);
       }
-      if (ca) { // Load CA only if TLS is active
-        enc.ca = fs.readFileSync(ca);
-      }
-      enc.allowInsecureAuth = aia; // Allow plain auth only if explicitly set (even with TLS)
+
+      // Allow insecure auth (-aia) overrides default secure behavior for STARTTLS
+      newConfig.allowInsecureAuth = settings.allowInsecureAuthGlobal;
+      console.log(`Configured for STARTTLS. Allow insecure auth before STARTTLS: ${newConfig.allowInsecureAuth}`);
 
     } else {
-      // Not secure or forced insecure
-      enc.secure = false;
-      enc.allowInsecureAuth = true; // Allow plain auth if not secure
+      // Plain text configuration (No STARTTLS offered)
+      newConfig.secure = false;
+      newConfig.starttls = false;
+      // Allow insecure auth if explicitly enabled OR if no certs were provided anyway (implicit insecure)
+      newConfig.allowInsecureAuth = settings.allowInsecureAuthGlobal || !(settings.certPath && settings.keyPath);
+      console.log(`Configured for Plain/Insecure. Allow insecure auth: ${newConfig.allowInsecureAuth}`);
     }
 
-    console.log(`Encryption config reloaded at ${new Date().toISOString()}`);
-    console.log(`Current config: secure=${enc.secure}, allowInsecureAuth=${enc.allowInsecureAuth}, requestCert=${enc.requestCert}`);
+    // Assign the successfully built config
+    currentTlsConfig = newConfig;
+    console.log(`Encryption config loaded: secure=${currentTlsConfig.secure}, starttls=${currentTlsConfig.starttls}, allowInsecureAuth=${currentTlsConfig.allowInsecureAuth}, requestCert=${currentTlsConfig.requestCert}`);
 
   } catch (error) {
-    console.error("Error loading encryption config:", error);
-    // Fallback to default insecure config
-    enc = { secure: false, allowInsecureAuth: true };
-    console.warn("Falling back to insecure SMTP configuration.");
+    console.error("FATAL: Error loading/processing encryption config:", error);
+    // If certs were *expected* based on args, this is fatal for this instance
+    if (settings.certPath || settings.keyPath) {
+        console.error("Crashing instance because required cert/key could not be loaded.");
+        throw error; // Let the pool/process management handle the crash
+    }
+    // Fallback to default insecure config only if no certs were ever specified
+    console.warn("Falling back to default insecure SMTP configuration due to loading error.");
+    currentTlsConfig = { secure: false, allowInsecureAuth: true, starttls: false };
   }
 }
+// --- End TLS Configuration Loading ---
 
-loadEncryptionConfig();
 
-console.log(
-  `Running a ${
-    enc.secure ? "secure" : "insecure"
-  } SMTP server proxy target setup.`
-);
-
+// --- SMTPServer Instance Creation ---
 function createServerInstance() {
-  const serverInstance = new SMTPServer({
-    ...enc, // Spread the current encryption config
-    name: name,
-    // Size limit (e.g., 50MB)
-    size: 50 * 1024 * 1024,
+    // Ensure config is loaded based on the *current* settings for this instance
+    loadEncryptionConfigBasedOnArgs();
 
-    // Use onAuth for authentication logic
-    onAuth(auth, session, callback) {
-      console.log(`Auth attempt: User=${auth.username}, Method=${auth.method}`);
-      // Implement your actual authentication logic here if needed
-      // For now, we accept any credentials provided IF allowInsecureAuth is true
-      // OR if the connection is already secured via STARTTLS/Implicit TLS
-      if (session.secure || enc.allowInsecureAuth) {
-          console.log(`Authentication successful for ${auth.username} (secure=${session.secure}, allowInsecure=${enc.allowInsecureAuth})`);
-          // Pass the credentials to the session object for later use
-          callback(null, {
-            user: { user: auth.username, password: auth.password },
-          });
-      } else {
-          console.warn(`Authentication failed for ${auth.username}: Insecure connection and insecure auth not allowed.`);
-          callback(new Error('Authentication failed: Secure connection required or insecure auth not allowed'));
-      }
-    },
+    const serverInstance = new SMTPServer({
+        // TLS settings from dynamic config
+        secure: currentTlsConfig.secure,
+        key: currentTlsConfig.key,
+        cert: currentTlsConfig.cert,
+        ca: currentTlsConfig.ca,
+        starttls: currentTlsConfig.starttls,
+        requestCert: currentTlsConfig.requestCert,
+        allowInsecureAuth: currentTlsConfig.allowInsecureAuth,
+        tls: currentTlsConfig.tls,
 
-    // Use onMailFrom and onRcptTo for sender/recipient validation if needed
-    onMailFrom(address, session, callback) {
-      console.log(`MAIL FROM: ${address.address} (secure=${session.secure})`);
-      // Add validation logic here if required
-      callback(); // Accept the sender
-    },
+        // Other server settings
+        name: settings.serverName,
+        size: 50 * 1024 * 1024, // 50MB limit
+        authOptional: true, // Allows connections without AUTH if client doesn't attempt it
 
-    onRcptTo(address, session, callback) {
-      console.log(`RCPT TO: ${address.address} (secure=${session.secure})`);
-      // Add validation logic here if required
-      callback(); // Accept the recipient
-    },
+        // Handlers
+        onAuth(auth, session, callback) {
+            console.log(`Auth attempt: User=${auth.username}, Method=${auth.method}, Secure=${session.secure}, StartTLS=${session.starttls}`);
+            // Check if authentication should be allowed based on current session state and config
+            const isSecureNow = session.secure; // `secure` is true after STARTTLS or for implicit TLS
+            const allowAuth = isSecureNow || currentTlsConfig.allowInsecureAuth; // Allow if secure OR insecure auth explicitly allowed
 
-    onData(stream, session, callback) {
-        console.log(`Receiving data from ${session.remoteAddress}...`);
-        let tempDirForAttachments = null; // Variable to hold attachment dir path if created
-        let mainJsonTempFile = null;      // Variable to hold main JSON file path if created
+            if (allowAuth) {
+                console.log(`Authentication successful for ${auth.username} (secure=${isSecureNow}, allowInsecureCfg=${currentTlsConfig.allowInsecureAuth})`);
+                callback(null, { user: { user: auth.username, password: auth.password } }); // Pass credentials
+            } else {
+                console.warn(`Authentication failed for ${auth.username}: Insecure connection (secure=${isSecureNow}) and insecure auth not allowed (allowInsecureCfg=${currentTlsConfig.allowInsecureAuth}).`);
+                // Use 530 5.7.0 for "Authentication required" which often implies TLS needed
+                callback(new Error('530 5.7.0 Authentication required (must issue STARTTLS command first)'));
+            }
+        },
 
-        simpleParser(stream)
-            .then(parsed => {
-                console.log(`Email parsed: Subject='${parsed.subject}' From='${parsed.from?.text}' To='${parsed.to?.text}' Attachments=${parsed.attachments?.length}`);
+        onMailFrom(address, session, callback) {
+            console.log(`MAIL FROM: ${address.address} (AuthUser: ${session.user?.user || 'none'}, Secure=${session.secure})`);
+            // Allow all senders for now
+            callback();
+        },
 
-                const emailData = {
-                    name: parsed.from?.value?.map((sender) => sender.name || sender.address).join(", ") || 'Unknown Sender',
-                    from: parsed.from?.value?.map((from) => from.address).join(", ") || 'unknown@example.com',
-                    to: parsed.to?.value?.map((to) => to.address).join(", "),
-                    subject: parsed.subject || '(no subject)',
-                    text: parsed.text,
-                    html: parsed.html,
-                    attachments: [], // Initialize as empty array
-                };
+        onRcptTo(address, session, callback) {
+            console.log(`RCPT TO: ${address.address} (AuthUser: ${session.user?.user || 'none'}, Secure=${session.secure})`);
+            // Allow all recipients for now
+            callback();
+        },
 
-                // Prefer HTML over text if both exist
-                if (parsed.html && parsed.text) {
-                    delete emailData.text;
-                } else if (!parsed.html && !parsed.text) {
-                    emailData.text = '(empty body)'; // Ensure there's some body content
-                }
+        onData(stream, session, callback) {
+            const remoteInfo = `${session.remoteAddress}:${session.remotePort}`;
+            console.log(`Receiving data from ${remoteInfo}...`);
+            let tempDirForAttachments = null;
+            let mainJsonTempFile = null;
 
-                // --- Attachment Handling ---
-                if (parsed.attachments && parsed.attachments.length > 0) {
-                    try {
-                        // Create a unique temporary directory for this email's attachments
-                        tempDirForAttachments = fs.mkdtempSync(path.join(os.tmpdir(), 'smtp-pipe-attach-'));
-                        console.log(`Created attachment directory: ${tempDirForAttachments}`);
+            simpleParser(stream)
+                .then(parsed => {
+                    console.log(`Email parsed: Subject='${parsed.subject}' From='${parsed.from?.text}' To='${parsed.to?.text}' Attachments=${parsed.attachments?.length}`);
 
-                        parsed.attachments.forEach((attachment) => {
-                            const safeFilename = attachment.filename ? path.basename(attachment.filename) : `attachment_${Date.now()}`; // Sanitize filename
-                            const attachmentFilepath = path.join(tempDirForAttachments, safeFilename);
-                            fs.writeFileSync(attachmentFilepath, attachment.content);
-                            console.log(`Saved attachment to: ${attachmentFilepath}`);
-                            // Pass the *path* to the Resend SDK via the JSON
-                            emailData.attachments.push({
-                                filepath: attachmentFilepath,
-                                filename: safeFilename // Also include filename for Resend
-                            });
-                        });
-                    } catch (error) {
-                        console.error("FATAL: Error saving attachments:", error);
-                        // Need to signal error back to the SMTP client
-                        // Cleanup any partially created dir/files before calling back
-                        if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
-                           fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
-                        }
-                        return callback(new Error("Failed to process attachments")); // Signal error
-                    }
-                }
-                // --- End Attachment Handling ---
-
-                // --- Main Logic: Pipe Program or Direct Resend ---
-                const fullObj = {
-                  // Ensure user object exists, provide default if necessary
-                  user: session.user?.user || 'anonymous',
-                  password: session.user?.password || '', // Be careful logging/storing passwords
-                  email: emailData,
-                };
-
-                if (pipeProgram) {
-                    try {
-                        mainJsonTempFile = `/tmp/${crypto.randomBytes(12).toString('hex')}.json`;
-                        fs.writeFileSync(mainJsonTempFile, JSON.stringify(fullObj, null, 2));
-                        console.log(`Wrote email data to: ${mainJsonTempFile}`);
-
-                        console.log(`Spawning pipe program: ${pipeProgram} ${mainJsonTempFile}`);
-                        const child = spawn(pipeProgram, [mainJsonTempFile], { stdio: 'pipe' }); // Use pipe for stdio
-
-                        let childStdout = '';
-                        let childStderr = '';
-                        child.stdout.on('data', (data) => {
-                            childStdout += data.toString();
-                        });
-                        child.stderr.on('data', (data) => {
-                             childStderr += data.toString();
-                        });
-
-                        child.on('error', (err) => {
-                            console.error(`Pipe program execution error: ${err}`);
-                            // Cleanup happens in 'close', just log here
-                        });
-
-                        child.on('close', (code) => {
-                            console.log(`Pipe script stdout:\n${childStdout}`);
-                            if(childStderr) {
-                                console.error(`Pipe script stderr:\n${childStderr}`);
-                            }
-                            console.log(`Pipe script exited with code ${code}`);
-
-                            // --- Moved Cleanup Logic ---
-                            // Now we cleanup AFTER the child process finishes
-                            try {
-                                // 1. Clean up the main JSON file
-                                if (mainJsonTempFile && fs.existsSync(mainJsonTempFile)) {
-                                    fs.unlinkSync(mainJsonTempFile);
-                                    console.log(`Cleaned up main temp file: ${mainJsonTempFile}`);
-                                }
-
-                                // 2. Clean up the attachment directory (if it was created)
-                                if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
-                                    if (typeof fs.rmSync === 'function') {
-                                        fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
-                                    } else {
-                                        fs.rmdirSync(tempDirForAttachments, { recursive: true }); // Fallback for older Node
-                                    }
-                                    console.log(`Cleaned up attachment directory: ${tempDirForAttachments}`);
-                                }
-                            } catch (cleanupError) {
-                                console.error("Error during post-pipe cleanup:", cleanupError);
-                            }
-                            // --- End Moved Cleanup Logic ---
-
-                            // Respond to SMTP client based on pipe script exit code
-                            if (code !== 0) {
-                                callback(new Error(`Processing script failed with code ${code}`));
-                            } else {
-                                callback(null, "Message accepted for processing");
-                            }
-                        }); // End child.on('close')
-
-                    } catch (error) {
-                        console.error("Error setting up or spawning pipe program:", error);
-                         // Cleanup any files/dirs created before the error
-                        if (mainJsonTempFile && fs.existsSync(mainJsonTempFile)) {
-                           fs.unlinkSync(mainJsonTempFile);
-                        }
-                        if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
-                           fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
-                        }
-                        callback(new Error("Internal server error during processing setup"));
-                    }
-
-                } else if (resendSend) {
-                    // Direct Resend path (ensure cleanup happens here too)
-                    console.log("Attempting direct Resend API call...");
-                    const resend = new Resend(fullObj.password); // Use password from session as API key
-                    resend.emails.send(fullObj.email)
-                      .then(result => {
-                        console.log("Email sent via Resend API: ", result);
-                        callback(null, "Message accepted via Resend API");
-                      })
-                      .catch(error => {
-                        console.error("Error sending email via Resend API:", error);
-                        callback(new Error("Failed to send email via Resend API"));
-                      })
-                      .finally(() => {
-                         // Cleanup attachments for direct send path
-                         if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
-                              try {
-                                 if (typeof fs.rmSync === 'function') {
-                                    fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
-                                 } else {
-                                    fs.rmdirSync(tempDirForAttachments, { recursive: true });
-                                 }
-                                 console.log(`Cleaned up attachment directory (Resend path): ${tempDirForAttachments}`);
-                              } catch (cleanupError) {
-                                 console.error("Error cleaning up attachments (Resend path):", cleanupError);
-                              }
-                         }
-                      });
-                } else {
-                    // No pipe, no Resend - just log (and cleanup attachments if any)
-                    console.log("No pipe program or Resend flag, logging email object:");
-                    console.log(JSON.stringify(fullObj, null, 2));
-                    if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
+                    // --- Attachment Saving ---
+                    const emailDataAttachments = []; // Prepare attachment info for JSON/Resend
+                    if (parsed.attachments && parsed.attachments.length > 0) {
                         try {
-                           if (typeof fs.rmSync === 'function') {
-                              fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
-                           } else {
-                              fs.rmdirSync(tempDirForAttachments, { recursive: true });
-                           }
-                           console.log(`Cleaned up attachment directory (log only path): ${tempDirForAttachments}`);
-                        } catch (cleanupError) {
-                           console.error("Error cleaning up attachments (log only path):", cleanupError);
+                            tempDirForAttachments = fs.mkdtempSync(path.join(os.tmpdir(), 'smtp-pipe-attach-'));
+                            console.log(`Created attachment directory: ${tempDirForAttachments}`);
+
+                            parsed.attachments.forEach((attachment, index) => {
+                                const safeFilename = attachment.filename
+                                    ? path.basename(attachment.filename) // Basic sanitization
+                                    : `attachment_${index + 1}_${Date.now()}`;
+                                const attachmentFilepath = path.join(tempDirForAttachments, safeFilename);
+                                fs.writeFileSync(attachmentFilepath, attachment.content);
+                                console.log(`Saved attachment ${index + 1} to: ${attachmentFilepath}`);
+                                // Store info needed by Resend SDK/pipe script
+                                emailDataAttachments.push({
+                                    filepath: attachmentFilepath, // Absolute path for Resend SDK
+                                    filename: safeFilename // Filename for Resend API
+                                });
+                            });
+                        } catch (error) {
+                            console.error(`FATAL: Error saving attachments for email from ${remoteInfo}:`, error);
+                            if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
+                                fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
+                            }
+                            return callback(new Error("554 Transaction failed: Error processing attachments"));
                         }
                     }
-                    callback(null, "Message logged");
-                }
-            })
-            .catch(err => {
-                console.error("Error parsing email stream:", err);
-                // Ensure cleanup if parsing fails after attachments were potentially saved
-                if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
-                    try {
-                       fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
-                    } catch(cleanupErr) {
-                       console.error("Error cleaning up attachments after parse error:", cleanupErr);
+                    // --- End Attachment Saving ---
+
+                    const emailData = {
+                        name: parsed.from?.value?.map((sender) => sender.name || sender.address).join(", ") || 'Unknown Sender',
+                        from: parsed.from?.value?.map((from) => from.address).join(", ") || 'unknown@example.com',
+                        to: parsed.to?.value?.map((to) => to.address).join(", "),
+                        subject: parsed.subject || '(no subject)',
+                        text: parsed.text,
+                        html: parsed.html,
+                        attachments: emailDataAttachments, // Use the processed attachments array
+                    };
+
+                    if (parsed.html && parsed.text) delete emailData.text;
+                    else if (!parsed.html && !parsed.text) emailData.text = '(empty body)';
+
+                    const fullObj = {
+                        user: session.user?.user || 'anonymous',
+                        password: session.user?.password || '',
+                        email: emailData,
+                    };
+
+                    // --- Execute Pipe or Resend ---
+                    if (settings.pipeProgram) {
+                        try {
+                            mainJsonTempFile = `/tmp/${crypto.randomBytes(12).toString('hex')}.json`;
+                            fs.writeFileSync(mainJsonTempFile, JSON.stringify(fullObj, null, 2));
+                            console.log(`Wrote email data for pipe to: ${mainJsonTempFile}`);
+
+                            console.log(`Spawning pipe program: ${settings.pipeProgram} ${mainJsonTempFile}`);
+                            const child = spawn(settings.pipeProgram, [mainJsonTempFile], { stdio: 'pipe' });
+
+                            let childStdout = '';
+                            let childStderr = '';
+                            child.stdout.on('data', (data) => { childStdout += data.toString(); });
+                            child.stderr.on('data', (data) => { childStderr += data.toString(); });
+
+                            child.on('error', (err) => {
+                                console.error(`Pipe program ${settings.pipeProgram} failed to spawn or execute: ${err}`);
+                                // Cleanup will happen in 'close'
+                            });
+
+                            child.on('close', (code) => { // Use 'close' event
+                                console.log(`Pipe script stdout:\n${childStdout}`);
+                                if(childStderr) console.error(`Pipe script stderr:\n${childStderr}`);
+                                console.log(`Pipe script ${settings.pipeProgram} exited with code ${code}`);
+
+                                // --- Cleanup inside 'close' ---
+                                try {
+                                    if (mainJsonTempFile && fs.existsSync(mainJsonTempFile)) {
+                                        fs.unlinkSync(mainJsonTempFile);
+                                        console.log(`Cleaned up main temp file: ${mainJsonTempFile}`);
+                                    }
+                                    if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
+                                        fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
+                                        console.log(`Cleaned up attachment directory: ${tempDirForAttachments}`);
+                                    }
+                                } catch (cleanupError) {
+                                    console.error("Error during post-pipe cleanup:", cleanupError);
+                                }
+                                // --- End Cleanup ---
+
+                                if (code !== 0) {
+                                    callback(new Error(`554 Transaction failed: Processing script failed with code ${code}`));
+                                } else {
+                                    callback(null, "250 OK: Message accepted for processing via pipe");
+                                }
+                            });
+
+                        } catch (error) {
+                            console.error(`Error setting up or spawning pipe program ${settings.pipeProgram}:`, error);
+                            if (mainJsonTempFile && fs.existsSync(mainJsonTempFile)) fs.unlinkSync(mainJsonTempFile);
+                            if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
+                            callback(new Error("554 Transaction failed: Internal server error during processing setup"));
+                        }
+                    } else if (settings.resendSend) {
+                       // Placeholder for direct Resend logic - requires Resend SDK setup
+                       console.error("Direct Resend (-r flag) logic not fully implemented in this example.");
+                        if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
+                            fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
+                        }
+                       callback(new Error("500 Internal Error: Direct Resend not implemented"));
+                       // Implement Resend SDK call here if needed, similar to pipeProgram but call Resend directly
+                       // Remember to cleanup tempDirForAttachments in a .then/.catch/.finally block
+                    } else {
+                        // No pipe or Resend flag - just log
+                        console.log("No pipe program or Resend flag. Logging email object only.");
+                        console.log(JSON.stringify(fullObj, null, 2));
+                        if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
+                             try {
+                                 fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
+                                 console.log(`Cleaned up attachment directory (log only path): ${tempDirForAttachments}`);
+                             } catch (cleanupError) {
+                                 console.error("Error cleaning up attachments (log only path):", cleanupError);
+                             }
+                         }
+                        callback(null, "250 OK: Message logged");
                     }
-                }
-                callback(new Error("Error parsing email data"));
-            });
-    }, // End onData
+                })
+                .catch(err => {
+                    console.error(`Error parsing email stream from ${remoteInfo}:`, err);
+                    if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
+                        try { fs.rmSync(tempDirForAttachments, { recursive: true, force: true }); } catch(e) {}
+                    }
+                    callback(new Error("451 Requested action aborted: error processing email data"));
+                });
+        }, // End onData
 
-    // Add other handlers as needed, like onConnect, onMailFrom, etc.
-    onConnect(session, callback) {
-      console.log(`Connection from ${session.remoteAddress}`);
-      callback(); // Accept the connection
-    },
-    onClose(session) {
-      console.log(`Connection closed from ${session.remoteAddress}`);
-    },
-     onError(err, session) {
-        console.error(`SMTP Server instance error (Session ID: ${session?.id}):`, err.message);
-        if (err.code === 'ERR_SSL_INAPPROPRIATE_FALLBACK') {
-          console.warn("TLS Fallback Warning occurred.");
-          // Potentially close the connection gracefully if possible
-        } else if (err.code === 'ECONNRESET') {
-          console.warn(`Connection reset by peer: ${session?.remoteAddress}`);
-        } else {
-          console.error("Unhandled SMTP Server Error Details:", err);
+        onConnect(session, callback) {
+          console.log(`Connection from ${session.remoteAddress} (ID: ${session.id})`);
+          callback(); // Accept the connection
+        },
+        onClose(session) {
+          console.log(`Connection closed from ${session.remoteAddress} (ID: ${session.id})`);
+        },
+        onError(err, session) { // Added session parameter
+            console.error(`SMTP Server instance error (Session ID: ${session?.id || 'N/A'}, Client: ${session?.clientHostname || 'N/A'}@${session?.remoteAddress || 'N/A'}):`, err.message);
+            if (err.code === 'ERR_SSL_INAPPROPRIATE_FALLBACK') {
+              console.warn("TLS Fallback Warning occurred.");
+            } else if (err.code === 'ECONNRESET') {
+              console.warn(`Connection reset by peer.`);
+            } else {
+              console.error("Unhandled SMTP Server Error Details:", err);
+            }
         }
-        // Depending on the error, you might want to log session details
-        if (session) {
-           console.error(`Session details: Client=${session.clientHostname}, Remote=${session.remoteAddress}`);
-        }
-    }
-  });
+    }); // End new SMTPServer
 
-  return serverInstance;
+    return serverInstance;
 }
+// --- End SMTPServer Instance Creation ---
 
-
-// --- Server Pool and Proxy Logic ---
-const POOL_SIZE = 2; // Number of backend SMTP server instances
-
+// --- Server Pool Class ---
 class ServerPool {
   constructor(size) {
     this.size = size;
@@ -391,129 +383,103 @@ class ServerPool {
     console.log(`Initializing server pool with size ${this.size}...`);
     const promises = [];
     for (let i = 0; i < this.size; i++) {
-      promises.push(this.addServer());
+      promises.push(this.addServer().catch(e => {
+        // Catch individual addServer errors so Promise.all doesn't fail early
+        console.error(`Failed to initialize server instance ${i + 1}: ${e.message}`);
+        return null; // Return null for failed instances
+      }));
     }
-    try {
-      await Promise.all(promises);
-      console.log("Server pool initialized successfully.");
-    } catch (error) {
-        console.error("Error initializing server pool, some servers may have failed:", error);
-        // Attempt recovery or log more details
-        this.retryFailedServers(); // Attempt to fill the pool
+    const results = await Promise.all(promises);
+    const successfulServers = this.servers.length; // Count how many actually got added
+    console.log(`Server pool initialization attempt finished. ${successfulServers}/${this.size} servers started.`);
+
+    if (successfulServers < this.size) {
+        console.log("Attempting recovery for failed servers...");
+        this.retryFailedServers(); // Start recovery in background
     }
   }
 
   async addServer() {
     if (this.servers.length >= this.size) {
-      console.log("Server pool is full, not adding.");
+      // console.log("Server pool is full, not adding.");
       return;
     }
 
     let serverInstance;
     try {
-      serverInstance = createServerInstance(); // Create the SMTP server logic
+      serverInstance = createServerInstance();
 
       const serverPort = await new Promise((resolve, reject) => {
-        // Listen on a random available port
-        const listener = serverInstance.listen(0, '127.0.0.1', (err) => { // Listen only on localhost
-          if (err) {
-            return reject(new Error(`Failed to listen on random port: ${err.message}`));
-          }
+        const listener = serverInstance.listen(0, '127.0.0.1', (err) => {
+          if (err) return reject(new Error(`Failed to listen: ${err.message}`));
           const address = listener.address();
-          if (!address || typeof address === 'string') {
-             return reject(new Error('Failed to get server address object.'));
-          }
-          console.log(`New SMTP server instance listening on 127.0.0.1:${address.port}`);
+          if (!address || typeof address === 'string') return reject(new Error('Failed to get server address.'));
           resolve(address.port);
         });
-
-         // Add error handling to the net.Server returned by listen
-        listener.on('error', (error) => {
-           console.error(`Error on net.Server for port discovery: ${error.message}`);
-           reject(error); // Ensure promise rejects if listener errors out before resolving port
+        listener.on('error', (error) => { // Handle listener errors separately
+           console.error(`net.Server listen error for pool instance: ${error.message}`);
+           reject(error);
         });
-
-        // Also handle errors on the SMTPServer instance itself
-        serverInstance.on("error", (error) => {
-          console.error(`Error on SMTP server instance: ${error.message}`);
-          // Attempt to refresh this specific server if it errors later
-          const index = this.servers.findIndex((s) => s.server === serverInstance);
-          if (index !== -1) {
-            console.warn(`Attempting to refresh server at index ${index} due to error.`);
-            this.refreshServer(index).catch(console.error);
-          } else {
-            console.error("Could not find errored server in pool for refresh.");
-          }
-        });
-
       });
 
       this.servers.push({ server: serverInstance, port: serverPort });
-      console.log(`Added server instance listening on port ${serverPort} to pool.`);
+      console.log(`Added server instance listening on 127.0.0.1:${serverPort} to pool.`);
 
     } catch (error) {
-      console.error(`Error creating or adding server instance: ${error.message}`);
+      console.error(`Error creating/adding server instance: ${error.message}`);
        if (serverInstance && serverInstance.server?.listening) {
-           serverInstance.close(); // Attempt cleanup if partially started
+           try { serverInstance.close(); } catch(e) { console.error("Error cleaning up failed server instance", e);}
        }
-      throw error; // Re-throw to be caught by initialize/retry logic
+      throw error;
     }
   }
 
   getNextServer() {
     if (this.servers.length === 0) {
-      console.error("No backend SMTP servers available in the pool!");
+      console.error("POOL ERROR: No backend SMTP servers available!");
       return null;
     }
+    // Simple round-robin
     const serverInfo = this.servers[this.currentIndex];
     this.currentIndex = (this.currentIndex + 1) % this.servers.length;
     console.log(`Routing connection to backend port ${serverInfo.port}`);
     return serverInfo;
   }
 
-   async refreshServer(index) {
+  async refreshServer(index) {
      if (index < 0 || index >= this.servers.length) {
        console.error(`Invalid server index ${index} for refresh.`);
        return;
      }
 
      const oldServerInfo = this.servers[index];
-     console.log(`Attempting to refresh server at index ${index} (Port: ${oldServerInfo.port})`);
+     console.log(`Attempting to refresh server at index ${index} (Old Port: ${oldServerInfo.port})`);
 
-     // 1. Create the new server instance first
      let newServerInstance;
      let newPort;
      try {
-       newServerInstance = createServerInstance();
+       newServerInstance = createServerInstance(); // Creates instance with *new* config
        newPort = await new Promise((resolve, reject) => {
-         const listener = newServerInstance.listen(0, '127.0.0.1', (err) => { // Listen only on localhost
-           if (err) return reject(new Error(`Failed to listen for new server: ${err.message}`));
+         const listener = newServerInstance.listen(0, '127.0.0.1', (err) => {
+           if (err) return reject(new Error(`Listen failed for refresh: ${err.message}`));
            const address = listener.address();
-            if (!address || typeof address === 'string') {
-             return reject(new Error('Failed to get new server address object.'));
-           }
+           if (!address || typeof address === 'string') return reject(new Error('Failed to get new server address.'));
            resolve(address.port);
          });
          listener.on('error', reject);
-         newServerInstance.on('error', (error) => {
-           console.error(`Error during startup of new server instance for refresh: ${error.message}`);
-           reject(error); // Reject the promise if the new server errors during startup
-         });
        });
-       console.log(`Successfully created replacement server instance on port ${newPort}.`);
+       console.log(`Created replacement server instance on port ${newPort}.`);
      } catch (error) {
-       console.error(`Failed to create or start replacement server: ${error}. Keeping old server ${oldServerInfo.port}.`);
+       console.error(`Failed to create replacement server: ${error}. Keeping old server ${oldServerInfo.port}.`);
        if (newServerInstance && newServerInstance.server?.listening) {
-           newServerInstance.close(); // Clean up the failed new server if needed
+           try { newServerInstance.close(); } catch(e){}
        }
-       return; // Abort refresh for this index
+       return; // Abort refresh for this server
      }
 
-     // 2. Replace in the pool array
      this.servers[index] = { server: newServerInstance, port: newPort };
      console.log(`Replaced server ${oldServerInfo.port} with ${newPort} in pool at index ${index}.`);
 
-     // 3. Gracefully close the old server
      console.log(`Scheduling closure of old server ${oldServerInfo.port}...`);
      setTimeout(() => {
        try {
@@ -522,180 +488,189 @@ class ServerPool {
          });
        } catch (closeError) {
          console.error(`Error closing old server ${oldServerInfo.port}: ${closeError}`);
-         // Log the error but continue, the OS should reclaim the port eventually
        }
-     }, 30000); // 30-second grace period for existing connections
+     }, 30000); // 30s grace period
    }
 
 
   async refreshAll() {
-    console.log("Refreshing all server instances in the pool...");
+    console.log("Refreshing all server instances in the pool with new config...");
+    // Load the latest config first based on current settings/files
+    loadEncryptionConfigBasedOnArgs();
+
     const refreshPromises = [];
     for (let i = 0; i < this.servers.length; i++) {
-        // Create a promise for each refresh operation
         refreshPromises.push(
             this.refreshServer(i).catch(error => {
-                // Catch errors from individual refreshes so Promise.all doesn't reject early
                 console.error(`Error refreshing server at index ${i}:`, error);
             })
         );
-        // Optional: Add a small delay between starting each refresh to stagger load
-        await new Promise(resolve => setTimeout(resolve, 200));
+        await new Promise(resolve => setTimeout(resolve, 200)); // Stagger
     }
-    await Promise.all(refreshPromises); // Wait for all refreshes to attempt completion
+    await Promise.all(refreshPromises);
     console.log("Server pool refresh process completed.");
   }
 
-  // Attempt to recover pool size if initialization failed
   async retryFailedServers() {
-    console.log("Attempting to recover server pool...");
-    while (this.servers.length < this.size) {
-        console.log(`Pool size ${this.servers.length}/${this.size}, attempting to add a server.`);
+    console.log("Attempting pool recovery...");
+    let attempts = 0;
+    const maxAttempts = 5; // Limit retries
+    while (this.servers.length < this.size && attempts < maxAttempts) {
+        attempts++;
+        console.log(`Pool recovery attempt ${attempts}: ${this.servers.length}/${this.size} servers active.`);
         try {
             await this.addServer();
         } catch (error) {
-            console.error(`Failed to add server during recovery: ${error.message}. Retrying in 10s...`);
-            await new Promise(resolve => setTimeout(resolve, 10000)); // Wait before retrying
+            console.error(`Failed recovery attempt ${attempts}: ${error.message}. Retrying in 15s...`);
+            await new Promise(resolve => setTimeout(resolve, 15000));
         }
     }
-     console.log("Server pool recovery attempt finished.");
+    if(this.servers.length < this.size) {
+       console.error(`Pool recovery failed after ${attempts} attempts. Pool size remains ${this.servers.length}/${this.size}.`);
+    } else {
+       console.log("Server pool recovery successful.");
+    }
   }
 
 } // End ServerPool class
+// --- End Server Pool Logic ---
 
-const serverPool = new ServerPool(POOL_SIZE);
-const mainPort = options.port || (enc.secure ? (cca ? 8465 : 465) : (insecure ? 2525 : (cer ? 587 : 25))) ; // Smart default port
 
-// --- Proxy Server Setup ---
+// --- Proxy Server Logic ---
+const mainProxyPort = settings.port || (currentTlsConfig.secure || currentTlsConfig.starttls ? (settings.requestClientCert ? 8465 : (currentTlsConfig.starttls ? 587 : 465)) : 25) ; // Determine default based on final config
+
 const proxyServer = net.createServer();
 
 proxyServer.on("error", (error) => {
-  console.error(`Proxy Server Error on port ${mainPort}:`, error);
-  // Consider attempting a restart after a delay
+  console.error(`Proxy Server Error on port ${mainProxyPort}:`, error);
   if (error.code === 'EADDRINUSE') {
-      console.error(`Port ${mainPort} is already in use. Cannot start proxy.`);
-      process.exit(1); // Exit if the main port is unusable
+      console.error(`Port ${mainProxyPort} is in use. Exiting.`);
+      process.exit(1);
   }
-   setTimeout(startProxyServer, 5000); // Try restarting
+   // Attempt restart
+   setTimeout(startProxyServer, 5000);
 });
 
 proxyServer.on("connection", (socket) => {
     const clientAddress = `${socket.remoteAddress}:${socket.remotePort}`;
-    console.log(`Proxy received connection from ${clientAddress}`);
+    // console.log(`Proxy received connection from ${clientAddress}`); // Can be noisy
 
     const targetServerInfo = serverPool.getNextServer();
 
     if (!targetServerInfo) {
-        console.error("No backend servers available in pool. Closing connection.");
-        socket.end("421 Service not available\r\n");
+        console.error("No backend servers available. Closing connection.");
+        socket.end("421 Service temporarily unavailable\r\n");
+        socket.destroy(); // Force close
         return;
     }
 
     let targetSocket;
     try {
-        targetSocket = net.connect({ port: targetServerInfo.port, host: '127.0.0.1' }, () => { // Connect to localhost explicitly
-            console.log(`Proxy connected to backend ${targetServerInfo.port} for ${clientAddress}`);
+        targetSocket = net.connect({ port: targetServerInfo.port, host: '127.0.0.1' }, () => {
+            // console.log(`Proxy connected to backend ${targetServerInfo.port} for ${clientAddress}`);
             try {
-                socket.pipe(targetSocket).pipe(socket);
+                // Pipe data flow in both directions
+                socket.pipe(targetSocket);
+                targetSocket.pipe(socket);
             } catch(pipeErr) {
-                 console.error(`Error piping streams for ${clientAddress} to ${targetServerInfo.port}: ${pipeErr}`);
+                 console.error(`Error piping streams for ${clientAddress} <-> ${targetServerInfo.port}: ${pipeErr}`);
                  socket.destroy();
                  targetSocket.destroy();
             }
         });
+
+        targetSocket.on('error', (err) => {
+            console.error(`Proxy error connecting to backend ${targetServerInfo.port} for ${clientAddress}: ${err.message} (Code: ${err.code})`);
+            if (!socket.destroyed) {
+               socket.end("421 Service unavailable\r\n"); // Try graceful close first
+               socket.destroy();
+            }
+        });
+
+        socket.on('error', (err) => {
+            if (err.code !== 'ECONNRESET') {
+                console.error(`Proxy client socket error (${clientAddress}): ${err.message}`);
+            }
+            if (!targetSocket.destroyed) targetSocket.destroy();
+        });
+
+        socket.on('close', (hadError) => {
+            // console.log(`Proxy client socket ${clientAddress} closed. Had error: ${hadError}`);
+            if (!targetSocket.destroyed) targetSocket.destroy();
+        });
+
+        targetSocket.on('close', (hadError) => {
+            // console.log(`Proxy backend socket ${targetServerInfo.port} closed for ${clientAddress}. Had error: ${hadError}`);
+            if (!socket.destroyed) socket.destroy();
+        });
+
     } catch(connectErr) {
-         console.error(`FATAL: net.connect threw error for backend ${targetServerInfo.port}: ${connectErr}`);
-         socket.end("421 Service unavailable\r\n");
+         console.error(`FATAL: net.connect failed for backend ${targetServerInfo.port}: ${connectErr}`);
+         if (!socket.destroyed) {
+            socket.end("421 Service unavailable\r\n");
+            socket.destroy();
+         }
          return;
     }
-
-
-    targetSocket.on('error', (err) => {
-        console.error(`Proxy error connecting to backend ${targetServerInfo.port} for ${clientAddress}: ${err.message}`);
-        socket.end("421 Service unavailable\r\n"); // Inform client
-        socket.destroy(); // Ensure client socket is closed
-    });
-
-    socket.on('error', (err) => {
-        if (err.code !== 'ECONNRESET') { // Ignore common connection resets
-            console.error(`Proxy client socket error (${clientAddress}): ${err.message}`);
-        }
-        targetSocket.destroy(); // Close backend connection if client errors
-    });
-
-    socket.on('end', () => {
-        console.log(`Proxy client ${clientAddress} disconnected.`);
-        targetSocket.end(); // Signal backend connection to end
-    });
-
-     socket.on('close', (hadError) => {
-        console.log(`Proxy client socket ${clientAddress} closed. Had error: ${hadError}`);
-        targetSocket.destroy(); // Ensure backend socket is destroyed on close
-    });
-
-    targetSocket.on('end', () => {
-        console.log(`Proxy backend connection ${targetServerInfo.port} ended for ${clientAddress}.`);
-        socket.end(); // Signal client connection to end
-    });
-
-    targetSocket.on('close', (hadError) => {
-        console.log(`Proxy backend socket ${targetServerInfo.port} closed for ${clientAddress}. Had error: ${hadError}`);
-        socket.destroy(); // Ensure client socket is destroyed on close
-    });
 });
 
 function startProxyServer() {
-    // Ensure the server isn't already listening
     if (proxyServer.listening) {
-        console.log(`Proxy server already listening on port ${mainPort}.`);
+        console.log(`Proxy server already listening on port ${mainProxyPort}.`);
         return;
     }
     try {
-        proxyServer.listen(mainPort, () => {
-            console.log(`Main SMTP Proxy Server listening on port ${mainPort}`);
+        proxyServer.listen(mainProxyPort, settings.host, () => { // Use settings.host if provided
+            const listenAddress = settings.host || '0.0.0.0'; // Default listen address
+            console.log(`Main SMTP Proxy Server listening on ${listenAddress}:${mainProxyPort}`);
         });
     } catch (error) {
-        console.error(`Failed to start proxy server on port ${mainPort}: ${error}`);
-        setTimeout(startProxyServer, 5000); // Retry after delay
+        console.error(`Failed to start proxy server on port ${mainProxyPort}: ${error}`);
+        setTimeout(startProxyServer, 5000);
     }
 }
+// --- End Proxy Server Logic ---
 
-// --- Key Refresh Logic ---
-if (refreshKeys && cer && key) { // Only refresh if keys are specified and interval is set
-  console.log(`Setting up key refresh interval: ${refreshKeys} hours.`);
+
+// --- Key Refresh Setup ---
+if (settings.refreshKeys && settings.certPath && settings.keyPath) {
+  console.log(`Setting up key refresh interval: ${settings.refreshKeys} hours.`);
   setInterval(async () => {
-    console.log(`Triggering scheduled key and server refresh (${refreshKeys} hours)...`);
+    console.log(`Triggering scheduled key and server refresh (${settings.refreshKeys} hours)...`);
     try {
-      loadEncryptionConfig(); // Reload keys/certs from files
-      await serverPool.refreshAll(); // Recreate backend instances with new config
+      // loadEncryptionConfigBasedOnArgs(); // Reloads based on current file paths in 'settings'
+      await serverPool.refreshAll(); // Recreates backend instances with new config
       console.log("Scheduled server refresh completed.");
     } catch (error) {
       console.error("Error during scheduled server refresh:", error);
     }
-  }, refreshKeys * 60 * 60 * 1000);
-} else if (refreshKeys) {
-    console.warn("Key refresh interval specified, but no certificate/key paths provided. Refresh inactive.");
+  }, settings.refreshKeys * 60 * 60 * 1000);
+} else if (settings.refreshKeys) {
+    console.warn("Key refresh interval specified (-rk), but no certificate (-c) / key (-k) paths provided. Refresh inactive.");
 }
+// --- End Key Refresh ---
 
 
-// --- Initialization ---
+// --- Main Initialization ---
+const serverPool = new ServerPool(POOL_SIZE);
+
 async function initialize() {
   console.log("Starting SMTP service initialization...");
   try {
-    await serverPool.initialize(); // Initialize backend pool
+    await serverPool.initialize();
     if (serverPool.servers.length > 0) {
-        startProxyServer(); // Start the main proxy only if backend servers are available
+        startProxyServer();
     } else {
-        console.error("Initialization failed: No backend servers could be started. Proxy not started.");
-        // Optionally, trigger retry logic or exit
-        console.log("Retrying initialization in 10 seconds...");
-        setTimeout(initialize, 10000);
+        console.error("Initialization failed: No backend servers available. Proxy not started.");
+        console.log("Retrying initialization in 15 seconds...");
+        setTimeout(initialize, 15000);
     }
   } catch (error) {
-    console.error("Unhandled error during initialization:", error);
-    console.log("Retrying initialization in 10 seconds...");
-    setTimeout(initialize, 10000); // Retry initialization
+    console.error("Unhandled error during initialization sequence:", error);
+    console.log("Retrying initialization in 15 seconds...");
+    setTimeout(initialize, 15000);
   }
 }
 
-initialize(); // Start the process
+initialize(); // Start the application
+// --- End Main Initialization ---
