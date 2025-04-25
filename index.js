@@ -8,6 +8,8 @@ const tls = require('tls');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
+const POOL_SIZE = 2;
+
 // --- Argument Parsing (Replaces global Commander reliance for core settings) ---
 let settings = {
     port: null, // Default set later based on security
