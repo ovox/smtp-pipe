@@ -328,8 +328,8 @@ function createServerInstance() {
                        // Remember to cleanup tempDirForAttachments in a .then/.catch/.finally block
                     } else {
                         // No pipe or Resend flag - just log
-                        console.log("No pipe program or Resend flag. Logging email object only.");
-                        console.log(JSON.stringify(fullObj, null, 2));
+                        console.log("No pipe program or Resend flag. Logging email object only. Taken off in PROD");
+                        // console.log(JSON.stringify(fullObj, null, 2));
                         if (tempDirForAttachments && fs.existsSync(tempDirForAttachments)) {
                              try {
                                  fs.rmSync(tempDirForAttachments, { recursive: true, force: true });
